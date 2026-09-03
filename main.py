@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 
 TOKEN = os.environ.get("BALE_TOKEN")
@@ -9,14 +10,11 @@ if not TOKEN:
 
 API = f"https://tapi.bale.ai/bot{TOKEN}"
 
-# شناسه کاربر صاحب ربات
 OWNER_ID = None
-
-# حداکثر تعداد کانال‌ها
 MAX_CHANNELS = 100
 
-# فهرست کانال‌های تحت پایش
 CHANNELS = {}
+TARGET_POST = None
 
 
 def call_api(method, data=None):
@@ -49,6 +47,7 @@ def send_message(chat_id, text):
 def process_update(update):
 
     global OWNER_ID
+    global TARGET_POST
 
     print("UPDATE:")
     print(update)
@@ -64,9 +63,9 @@ def process_update(update):
 
     text = message.get("text", "") or ""
 
-    # -------------------------
-    # پیام خصوصی با ربات
-    # -------------------------
+    # =========================
+    # پیام خصوصی
+    # =========================
 
     if chat_type == "private":
 
@@ -77,41 +76,31 @@ def process_update(update):
         if chat_id != OWNER_ID:
             return
 
+        # -------------------------
+        # START
+        # -------------------------
+
         if text == "/start":
 
             send_message(
                 chat_id,
                 "🤖 ربات پایش بازنشر فعال است.\n\n"
                 "دستورات:\n\n"
-                "/addchannel\n"
+                "/addchannel @username\n"
                 "افزودن کانال\n\n"
                 "/listchannels\n"
                 "نمایش کانال‌ها\n\n"
-                "/removechannel\n"
-                "حذف کانال"
+                "/removechannel @username\n"
+                "حذف کانال\n\n"
+                "/watch لینک_پست\n"
+                "انتخاب پست هدف\n\n"
+                "/target\n"
+                "نمایش پست هدف"
             )
 
-        elif text == "/listchannels":
-
-            if not CHANNELS:
-                send_message(
-                    chat_id,
-                    "📭 هنوز هیچ کانالی برای پایش ثبت نشده است."
-                )
-                return
-
-            result = "📡 کانال‌های تحت پایش:\n\n"
-
-            for number, (channel_id, channel) in enumerate(
-                CHANNELS.items(), 1
-            ):
-
-                result += (
-                    f"{number}. {channel['title']}\n"
-                    f"@{channel['username']}\n\n"
-                )
-
-            send_message(chat_id, result)
+        # -------------------------
+        # ADD CHANNEL
+        # -------------------------
 
         elif text.startswith("/addchannel"):
 
@@ -138,11 +127,7 @@ def process_update(update):
 
                 return
 
-            # فعلاً کانال را با نام کاربری ثبت می‌کنیم
-
-            channel_key = username
-
-            if channel_key in CHANNELS:
+            if username in CHANNELS:
 
                 send_message(
                     chat_id,
@@ -151,16 +136,47 @@ def process_update(update):
 
                 return
 
-            CHANNELS[channel_key] = {
+            CHANNELS[username] = {
                 "title": username,
                 "username": username
             }
 
             send_message(
                 chat_id,
-                f"✅ کانال @{username} به فهرست پایش اضافه شد.\n\n"
+                f"✅ کانال @{username} اضافه شد.\n\n"
                 f"تعداد کانال‌ها: {len(CHANNELS)} از ۱۰۰"
             )
+
+        # -------------------------
+        # LIST CHANNELS
+        # -------------------------
+
+        elif text == "/listchannels":
+
+            if not CHANNELS:
+
+                send_message(
+                    chat_id,
+                    "📭 هنوز هیچ کانالی ثبت نشده است."
+                )
+
+                return
+
+            result = "📡 کانال‌های تحت پایش:\n\n"
+
+            for number, (username, channel) in enumerate(
+                CHANNELS.items(), 1
+            ):
+
+                result += (
+                    f"{number}. @{username}\n"
+                )
+
+            send_message(chat_id, result)
+
+        # -------------------------
+        # REMOVE CHANNEL
+        # -------------------------
 
         elif text.startswith("/removechannel"):
 
@@ -182,7 +198,7 @@ def process_update(update):
 
                 send_message(
                     chat_id,
-                    "❌ این کانال در فهرست پایش نیست."
+                    "❌ این کانال در فهرست نیست."
                 )
 
                 return
@@ -194,6 +210,83 @@ def process_update(update):
                 f"✅ کانال @{username} حذف شد."
             )
 
+        # -------------------------
+        # WATCH
+        # -------------------------
+
+        elif text.startswith("/watch"):
+
+            parts = text.split()
+
+            if len(parts) != 2:
+
+                send_message(
+                    chat_id,
+                    "فرمت صحیح:\n\n"
+                    "/watch https://ble.ir/barghsb/13"
+                )
+
+                return
+
+            link = parts[1].strip()
+
+            # تشخیص لینک بله
+            match = re.search(
+                r"ble\.ir/([^/]+)/(\d+)",
+                link
+            )
+
+            if not match:
+
+                send_message(
+                    chat_id,
+                    "❌ لینک معتبر بله پیدا نشد.\n\n"
+                    "نمونه:\n"
+                    "/watch https://ble.ir/barghsb/13"
+                )
+
+                return
+
+            username = match.group(1)
+            message_id = int(match.group(2))
+
+            TARGET_POST = {
+                "username": username,
+                "message_id": message_id,
+                "link": link
+            }
+
+            send_message(
+                chat_id,
+                "🎯 پست هدف ثبت شد.\n\n"
+                f"کانال: @{username}\n"
+                f"شماره پست: {message_id}\n\n"
+                "حالا آماده مقایسه بازنشرها هستیم."
+            )
+
+        # -------------------------
+        # TARGET
+        # -------------------------
+
+        elif text == "/target":
+
+            if TARGET_POST is None:
+
+                send_message(
+                    chat_id,
+                    "🎯 هنوز پست هدفی ثبت نشده است."
+                )
+
+            else:
+
+                send_message(
+                    chat_id,
+                    "🎯 پست هدف فعلی:\n\n"
+                    f"کانال: @{TARGET_POST['username']}\n"
+                    f"شماره پست: {TARGET_POST['message_id']}\n"
+                    f"لینک:\n{TARGET_POST['link']}"
+                )
+
         else:
 
             send_message(
@@ -204,9 +297,9 @@ def process_update(update):
 
         return
 
-    # -------------------------
-    # دریافت پست کانال
-    # -------------------------
+    # =========================
+    # پست کانال
+    # =========================
 
     if chat_type == "channel":
 
@@ -227,7 +320,7 @@ def process_update(update):
 def main():
 
     print("================================")
-    print("BALE MONITOR V1")
+    print("BALE MONITOR V2")
     print("================================")
 
     offset = 0
