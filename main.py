@@ -1,81 +1,264 @@
 import os
 import time
-import json
+import hashlib
 import requests
+from supabase import create_client
+
+
+# =========================
+# تنظیمات
+# =========================
 
 TOKEN = os.environ.get("BALE_TOKEN")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
+
+MAX_CHANNELS = 100
 
 if not TOKEN:
     raise RuntimeError("BALE_TOKEN is not configured")
 
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL is not configured")
+
+if not SUPABASE_SECRET_KEY:
+    raise RuntimeError("SUPABASE_SECRET_KEY is not configured")
+
+
 API = f"https://tapi.bale.ai/bot{TOKEN}"
 
-DATA_FILE = "data.json"
-MAX_CHANNELS = 100
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_SECRET_KEY
+)
+
 
 OWNER_ID = None
-
-CHANNELS = {}
 TARGET_POST = None
-ALERTED_POSTS = []
 
 
 # =========================
-# ذخیره و خواندن اطلاعات
+# ارتباط با Supabase
 # =========================
 
-def load_data():
+def stable_id(username):
+    """
+    برای جدول channels یک شناسه عددی
+    ثابت بر اساس نام کانال تولید می‌کند.
+    """
+
+    value = hashlib.sha256(
+        username.encode("utf-8")
+    ).hexdigest()
+
+    return int(value[:15], 16)
+
+
+def load_settings():
 
     global OWNER_ID
-    global CHANNELS
     global TARGET_POST
-    global ALERTED_POSTS
-
-    if not os.path.exists(DATA_FILE):
-        print("No data file. Starting fresh.")
-        return
 
     try:
 
-        with open(DATA_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
+        result = (
+            supabase
+            .table("bot_settings")
+            .select("key,value")
+            .execute()
+        )
 
-        OWNER_ID = data.get("owner_id")
-        CHANNELS = data.get("channels", {})
-        TARGET_POST = data.get("target_post")
-        ALERTED_POSTS = data.get("alerted_posts", [])
+        settings = {}
 
-        print("Data loaded successfully.")
+        for row in result.data or []:
+            settings[row["key"]] = row["value"]
+
+        if settings.get("owner_id"):
+            OWNER_ID = int(settings["owner_id"])
+
+        print("Settings loaded.")
 
     except Exception as error:
 
-        print("DATA LOAD ERROR:", error)
+        print("SETTINGS LOAD ERROR:", error)
 
 
-def save_data():
-
-    data = {
-        "owner_id": OWNER_ID,
-        "channels": CHANNELS,
-        "target_post": TARGET_POST,
-        "alerted_posts": ALERTED_POSTS[-1000:]
-    }
+def save_setting(key, value):
 
     try:
 
-        with open(DATA_FILE, "w", encoding="utf-8") as file:
-            json.dump(
-                data,
-                file,
-                ensure_ascii=False,
-                indent=2
+        supabase.table("bot_settings").upsert(
+            {
+                "key": key,
+                "value": str(value)
+            }
+        ).execute()
+
+    except Exception as error:
+
+        print("SETTING SAVE ERROR:", error)
+
+
+def load_target():
+
+    global TARGET_POST
+
+    try:
+
+        result = (
+            supabase
+            .table("target_posts")
+            .select("*")
+            .order("id", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        rows = result.data or []
+
+        if rows:
+
+            row = rows[0]
+
+            TARGET_POST = {
+                "username": row["username"],
+                "message_id": int(row["message_id"])
+            }
+
+            print(
+                "Target loaded:",
+                TARGET_POST
             )
 
-        print("Data saved.")
+        else:
+
+            TARGET_POST = None
 
     except Exception as error:
 
-        print("DATA SAVE ERROR:", error)
+        print("TARGET LOAD ERROR:", error)
+
+
+def save_target(username, message_id):
+
+    global TARGET_POST
+
+    try:
+
+        # فقط آخرین پست هدف نگهداری شود
+        supabase.table("target_posts").delete().neq(
+            "id",
+            0
+        ).execute()
+
+        supabase.table("target_posts").insert(
+            {
+                "channel_id": stable_id(username),
+                "username": username,
+                "message_id": message_id
+            }
+        ).execute()
+
+        TARGET_POST = {
+            "username": username,
+            "message_id": message_id
+        }
+
+        print("Target saved.")
+
+    except Exception as error:
+
+        print("TARGET SAVE ERROR:", error)
+
+
+# =========================
+# کانال‌ها
+# =========================
+
+def get_channels():
+
+    try:
+
+        result = (
+            supabase
+            .table("channels")
+            .select("username")
+            .eq("active", True)
+            .order("created_at")
+            .execute()
+        )
+
+        return [
+            row["username"]
+            for row in (result.data or [])
+        ]
+
+    except Exception as error:
+
+        print("CHANNEL LOAD ERROR:", error)
+
+        return []
+
+
+def add_channel(username):
+
+    try:
+
+        existing = (
+            supabase
+            .table("channels")
+            .select("username")
+            .eq("username", username)
+            .limit(1)
+            .execute()
+        )
+
+        if existing.data:
+
+            return False, "exists"
+
+        channels = get_channels()
+
+        if len(channels) >= MAX_CHANNELS:
+
+            return False, "full"
+
+        supabase.table("channels").insert(
+            {
+                "id": stable_id(username),
+                "username": username,
+                "active": True
+            }
+        ).execute()
+
+        return True, "added"
+
+    except Exception as error:
+
+        print("CHANNEL ADD ERROR:", error)
+
+        return False, "error"
+
+
+def remove_channel(username):
+
+    try:
+
+        result = (
+            supabase
+            .table("channels")
+            .delete()
+            .eq("username", username)
+            .execute()
+        )
+
+        return bool(result.data)
+
+    except Exception as error:
+
+        print("CHANNEL REMOVE ERROR:", error)
+
+        return False
 
 
 # =========================
@@ -95,6 +278,7 @@ def call_api(method, data=None):
     result = response.json()
 
     if not result.get("ok"):
+
         raise RuntimeError(result)
 
     return result.get("result")
@@ -112,13 +296,64 @@ def send_message(chat_id, text):
 
 
 # =========================
+# جلوگیری از هشدار تکراری
+# =========================
+
+def already_alerted(channel_username, message_id):
+
+    try:
+
+        result = (
+            supabase
+            .table("alerts")
+            .select("id")
+            .eq("channel_username", channel_username)
+            .eq("message_id", message_id)
+            .limit(1)
+            .execute()
+        )
+
+        return bool(result.data)
+
+    except Exception as error:
+
+        print("ALERT CHECK ERROR:", error)
+
+        return False
+
+
+def save_alert(
+    channel_username,
+    message_id,
+    target_message_id
+):
+
+    try:
+
+        supabase.table("alerts").insert(
+            {
+                "channel_username": channel_username,
+                "message_id": message_id,
+                "target_message_id": target_message_id
+            }
+        ).execute()
+
+        return True
+
+    except Exception as error:
+
+        print("ALERT SAVE ERROR:", error)
+
+        return False
+
+
+# =========================
 # پردازش پیام
 # =========================
 
 def process_update(update):
 
     global OWNER_ID
-    global TARGET_POST
 
     print("UPDATE:")
     print(update)
@@ -129,10 +364,12 @@ def process_update(update):
         return
 
     chat = message.get("chat", {})
+
     chat_id = chat.get("id")
     chat_type = chat.get("type")
 
     text = message.get("text", "") or ""
+
 
     # =========================
     # پیام خصوصی
@@ -143,15 +380,28 @@ def process_update(update):
         if OWNER_ID is None:
 
             OWNER_ID = chat_id
-            save_data()
+
+            save_setting(
+                "owner_id",
+                OWNER_ID
+            )
+
+            print(
+                "OWNER REGISTERED:",
+                OWNER_ID
+            )
 
         if chat_id != OWNER_ID:
             return
 
+
+        # =========================
         # /start
+        # =========================
+
         if text == "/start":
 
-            target_text = "تنظیم نشده"
+            channels = get_channels()
 
             if TARGET_POST:
 
@@ -160,25 +410,51 @@ def process_update(update):
                     f"{TARGET_POST['message_id']}"
                 )
 
+            else:
+
+                target_text = "تنظیم نشده"
+
+
             send_message(
                 chat_id,
+
                 "🤖 ربات پایش بازنشر فعال است.\n\n"
-                f"🎯 پست هدف: {target_text}\n\n"
+
+                f"🎯 پست هدف:\n"
+                f"{target_text}\n\n"
+
+                f"📡 تعداد کانال‌های تحت پایش: "
+                f"{len(channels)} از {MAX_CHANNELS}\n\n"
+
                 "دستورات:\n\n"
+
                 "/watch لینک پست\n"
                 "تعیین پست هدف\n\n"
+
                 "/addchannel @username\n"
                 "افزودن کانال\n\n"
+
                 "/listchannels\n"
                 "فهرست کانال‌ها\n\n"
+
                 "/removechannel @username\n"
                 "حذف کانال\n\n"
+
                 "/target\n"
-                "نمایش پست هدف"
+                "نمایش پست هدف\n\n"
+
+                "/status\n"
+                "وضعیت ربات"
             )
 
+            return
+
+
+        # =========================
         # /watch
-        elif text.startswith("/watch"):
+        # =========================
+
+        if text.startswith("/watch"):
 
             parts = text.split()
 
@@ -186,6 +462,7 @@ def process_update(update):
 
                 send_message(
                     chat_id,
+
                     "فرمت صحیح:\n\n"
                     "/watch https://ble.ir/barghsb/13"
                 )
@@ -205,17 +482,22 @@ def process_update(update):
 
             try:
 
-                clean = link.split("?")[0].rstrip("/")
+                clean = (
+                    link
+                    .split("?")[0]
+                    .rstrip("/")
+                )
 
-                parts_link = clean.split("/")
+                link_parts = clean.split("/")
 
-                username = parts_link[-2]
-                message_id = int(parts_link[-1])
+                username = link_parts[-2]
+                message_id = int(link_parts[-1])
 
             except Exception:
 
                 send_message(
                     chat_id,
+
                     "❌ فرمت لینک صحیح نیست.\n\n"
                     "نمونه:\n"
                     "/watch https://ble.ir/barghsb/13"
@@ -223,23 +505,34 @@ def process_update(update):
 
                 return
 
-            TARGET_POST = {
-                "username": username,
-                "message_id": message_id
-            }
 
-            save_data()
+            save_target(
+                username,
+                message_id
+            )
+
 
             send_message(
                 chat_id,
+
                 "🎯 پست هدف ثبت شد.\n\n"
+
                 f"📢 کانال: @{username}\n"
                 f"🆔 پست: {message_id}\n\n"
+
                 "از این به بعد بازنشر این پست بررسی می‌شود."
             )
 
+            return
+
+
+        # =========================
         # /target
-        elif text == "/target":
+        # =========================
+
+        if text == "/target":
+
+            load_target()
 
             if not TARGET_POST:
 
@@ -252,13 +545,21 @@ def process_update(update):
 
                 send_message(
                     chat_id,
+
                     "🎯 پست هدف فعلی:\n\n"
+
                     f"📢 @{TARGET_POST['username']}\n"
                     f"🆔 پست: {TARGET_POST['message_id']}"
                 )
 
+            return
+
+
+        # =========================
         # /addchannel
-        elif text.startswith("/addchannel"):
+        # =========================
+
+        if text.startswith("/addchannel"):
 
             parts = text.split()
 
@@ -266,47 +567,66 @@ def process_update(update):
 
                 send_message(
                     chat_id,
+
                     "فرمت صحیح:\n\n"
                     "/addchannel @username"
                 )
 
                 return
 
-            username = parts[1].replace("@", "").strip()
+            username = (
+                parts[1]
+                .replace("@", "")
+                .strip()
+            )
 
-            if len(CHANNELS) >= MAX_CHANNELS:
+            success, result = add_channel(username)
 
-                send_message(
-                    chat_id,
-                    "❌ ظرفیت ۱۰۰ کانال تکمیل شده است."
-                )
-
-                return
-
-            if username in CHANNELS:
+            if result == "exists":
 
                 send_message(
                     chat_id,
                     "⚠️ این کانال قبلاً ثبت شده است."
                 )
 
-                return
+            elif result == "full":
 
-            CHANNELS[username] = True
+                send_message(
+                    chat_id,
+                    "❌ ظرفیت ۱۰۰ کانال تکمیل شده است."
+                )
 
-            save_data()
+            elif success:
 
-            send_message(
-                chat_id,
-                f"✅ @{username} اضافه شد.\n\n"
-                f"📊 تعداد کانال‌ها: "
-                f"{len(CHANNELS)} از ۱۰۰"
-            )
+                count = len(get_channels())
 
+                send_message(
+                    chat_id,
+
+                    f"✅ @{username} اضافه شد.\n\n"
+                    f"📊 تعداد کانال‌ها: "
+                    f"{count} از {MAX_CHANNELS}"
+                )
+
+            else:
+
+                send_message(
+                    chat_id,
+                    "❌ هنگام ثبت کانال خطایی رخ داد."
+                )
+
+            return
+
+
+        # =========================
         # /listchannels
-        elif text == "/listchannels":
+        # =========================
 
-            if not CHANNELS:
+        if text == "/listchannels":
+
+            channels = get_channels()
+
+            if not channels:
 
                 send_message(
                     chat_id,
@@ -315,18 +635,32 @@ def process_update(update):
 
                 return
 
+
             result = "📡 کانال‌های تحت پایش:\n\n"
 
             for i, username in enumerate(
-                CHANNELS.keys(), 1
+                channels,
+                1
             ):
 
-                result += f"{i}. @{username}\n"
+                result += (
+                    f"{i}. @{username}\n"
+                )
 
-            send_message(chat_id, result)
 
+            send_message(
+                chat_id,
+                result
+            )
+
+            return
+
+
+        # =========================
         # /removechannel
-        elif text.startswith("/removechannel"):
+        # =========================
+
+        if text.startswith("/removechannel"):
 
             parts = text.split()
 
@@ -334,33 +668,71 @@ def process_update(update):
 
                 send_message(
                     chat_id,
+
                     "فرمت صحیح:\n\n"
                     "/removechannel @username"
                 )
 
                 return
 
-            username = parts[1].replace("@", "").strip()
+            username = (
+                parts[1]
+                .replace("@", "")
+                .strip()
+            )
 
-            if username not in CHANNELS:
+            if remove_channel(username):
 
                 send_message(
                     chat_id,
+
+                    f"✅ @{username} حذف شد."
+                )
+
+            else:
+
+                send_message(
+                    chat_id,
+
                     "❌ این کانال ثبت نشده است."
                 )
 
-                return
+            return
 
-            del CHANNELS[username]
 
-            save_data()
+        # =========================
+        # /status
+        # =========================
+
+        if text == "/status":
+
+            channels = get_channels()
+
+            target = "تنظیم نشده"
+
+            if TARGET_POST:
+
+                target = (
+                    f"@{TARGET_POST['username']} / "
+                    f"{TARGET_POST['message_id']}"
+                )
+
 
             send_message(
                 chat_id,
-                f"✅ @{username} حذف شد."
+
+                "📊 وضعیت ربات\n\n"
+
+                "🟢 ربات فعال است\n"
+                f"📡 کانال‌ها: {len(channels)} / 100\n"
+                f"🎯 هدف: {target}\n"
+                "💾 ذخیره‌سازی: Supabase"
             )
 
+            return
+
         return
+
 
     # =========================
     # پست کانال
@@ -368,10 +740,19 @@ def process_update(update):
 
     if chat_type == "channel":
 
-        username = chat.get("username", "")
-        message_id = message.get("message_id")
+        username = chat.get(
+            "username",
+            ""
+        )
 
-        if username not in CHANNELS:
+        message_id = message.get(
+            "message_id"
+        )
+
+
+        channels = get_channels()
+
+        if username not in channels:
 
             print(
                 "CHANNEL NOT MONITORED:",
@@ -380,18 +761,20 @@ def process_update(update):
 
             return
 
+
         print(
             "CHECKING CHANNEL:",
             username,
             message_id
         )
 
-        # اگر پست هدف نداریم
+
         if not TARGET_POST:
 
             print("NO TARGET POST")
 
             return
+
 
         # =========================
         # اطلاعات Forward
@@ -402,46 +785,59 @@ def process_update(update):
             {}
         )
 
-        forward_chat_id = forward_chat.get("id")
-
         forward_message_id = message.get(
             "forward_from_message_id"
         )
 
+
         # =========================
-        # تشخیص بازنشر
+        # هدف
         # =========================
 
-        target_username = TARGET_POST["username"]
-        target_message_id = TARGET_POST["message_id"]
+        target_username = (
+            TARGET_POST["username"]
+        )
 
-        # فعلاً شناسه کانال اصلی را از username
-        # نمی‌توانیم حدس بزنیم.
-        #
-        # بنابراین اگر Forward از کانال هدف باشد،
-        # message_id باید برابر باشد و username
-        # مقصد تحت پایش باشد.
+        target_message_id = (
+            TARGET_POST["message_id"]
+        )
+
+
+        # =========================
+        # تشخیص بازنشر مستقیم
+        # =========================
 
         if (
-            forward_message_id == target_message_id
+            forward_message_id
+            == target_message_id
             and
             forward_chat.get("username")
             == target_username
         ):
 
-            alert_key = (
-                f"{username}:{message_id}"
-            )
+            print("MATCH FOUND!")
 
-            if alert_key in ALERTED_POSTS:
 
-                print("DUPLICATE ALERT")
+            # جلوگیری از هشدار تکراری
+
+            if already_alerted(
+                username,
+                message_id
+            ):
+
+                print(
+                    "DUPLICATE ALERT"
+                )
 
                 return
 
-            ALERTED_POSTS.append(alert_key)
 
-            save_data()
+            save_alert(
+                username,
+                message_id,
+                target_message_id
+            )
+
 
             link = ""
 
@@ -453,17 +849,25 @@ def process_update(update):
                     f"{message_id}"
                 )
 
+
             alert = (
                 "🚨 بازنشر پیدا شد!\n\n"
+
                 f"📢 کانال: @{username}\n"
                 f"🆔 شماره پست: {message_id}\n\n"
+
                 "🎯 پست اصلی:\n"
                 f"@{target_username} / "
                 f"{target_message_id}\n\n"
+
                 f"🔗 {link}"
             )
 
-            print("MATCH FOUND!")
+
+            print(
+                "SENDING ALERT"
+            )
+
 
             if OWNER_ID:
 
@@ -479,13 +883,25 @@ def process_update(update):
 
 def main():
 
-    print("==============================")
-    print("BALE MONITOR V4")
-    print("==============================")
+    print(
+        "=============================="
+    )
 
-    load_data()
+    print(
+        "BALE MONITOR V5 - SUPABASE"
+    )
+
+    print(
+        "=============================="
+    )
+
+
+    load_settings()
+    load_target()
+
 
     offset = 0
+
 
     while True:
 
@@ -500,19 +916,32 @@ def main():
                 }
             )
 
+
             for update in updates or []:
 
-                update_id = update.get("update_id")
+                update_id = update.get(
+                    "update_id"
+                )
+
 
                 if update_id is not None:
 
-                    offset = update_id + 1
+                    offset = (
+                        update_id + 1
+                    )
 
-                process_update(update)
+
+                process_update(
+                    update
+                )
+
 
         except Exception as error:
 
-            print("ERROR:", error)
+            print(
+                "ERROR:",
+                error
+            )
 
             time.sleep(5)
 
