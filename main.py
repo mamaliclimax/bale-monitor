@@ -2,21 +2,19 @@ import os
 import time
 import requests
 
-TOKEN = os.getenv("BALE_TOKEN")
+TOKEN = os.environ.get("BALE_TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("BALE_TOKEN تنظیم نشده است")
+    raise RuntimeError("BALE_TOKEN is not configured")
 
 API = f"https://tapi.bale.ai/bot{TOKEN}"
 
 
-def bale(method, data=None):
-    url = f"{API}/{method}"
-
+def call_api(method, data=None):
     response = requests.post(
-        url,
+        f"{API}/{method}",
         json=data or {},
-        timeout=40
+        timeout=60
     )
 
     response.raise_for_status()
@@ -30,7 +28,7 @@ def bale(method, data=None):
 
 
 def send_message(chat_id, text):
-    return bale(
+    return call_api(
         "sendMessage",
         {
             "chat_id": chat_id,
@@ -39,14 +37,39 @@ def send_message(chat_id, text):
     )
 
 
+def process_update(update):
+    print("UPDATE:")
+    print(update)
+
+    message = update.get("message")
+
+    if not message:
+        return
+
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+
+    text = message.get("text", "")
+
+    # پاسخ به /start
+    if text == "/start":
+        send_message(
+            chat_id,
+            "🤖 ربات پایش بازنشر فعال است.\n\n"
+            "نسخه آزمایشی با موفقیت اجرا شد."
+        )
+
+
 def main():
-    print("Bale Monitor started...")
+    print("================================")
+    print("BALE MONITOR STARTED")
+    print("================================")
 
     offset = 0
 
     while True:
         try:
-            updates = bale(
+            updates = call_api(
                 "getUpdates",
                 {
                     "offset": offset,
@@ -57,35 +80,15 @@ def main():
 
             for update in updates or []:
 
-                offset = update["update_id"] + 1
+                update_id = update.get("update_id")
 
-                message = update.get("message")
+                if update_id is not None:
+                    offset = update_id + 1
 
-                if not message:
-                    continue
+                process_update(update)
 
-                chat = message.get("chat", {})
-                chat_id = chat.get("id")
-
-                text = message.get("text", "")
-
-                print(
-                    "Message:",
-                    text,
-                    "Chat:",
-                    chat_id
-                )
-
-                if text == "/start":
-                    send_message(
-                        chat_id,
-                        "🤖 ربات پایش بازنشر آماده است.\n\n"
-                        "در نسخه بعدی امکان ثبت کانال‌ها و "
-                        "پایش بازنشر پست‌ها اضافه می‌شود."
-                    )
-
-        except Exception as e:
-            print("ERROR:", e)
+        except Exception as error:
+            print("ERROR:", error)
             time.sleep(5)
 
 
