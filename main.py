@@ -1,9 +1,8 @@
 import os
 import time
-import re
 import requests
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from supabase import create_client
 
@@ -26,7 +25,7 @@ if not SUPABASE_SECRET_KEY:
     raise Exception("SUPABASE_SECRET_KEY is missing")
 
 
-BASE_URL = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
+BALE_API = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
 
 supabase = create_client(
     SUPABASE_URL,
@@ -35,11 +34,25 @@ supabase = create_client(
 
 
 # =========================================================
+# GLOBALS
+# =========================================================
+
+OFFSET = None
+
+OWNER_ID = None
+
+SELECTED_SOURCE = {}
+
+
+# =========================================================
 # BASIC HELPERS
 # =========================================================
 
-def clean_username(username):
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
+
+def clean_username(username):
     if not username:
         return None
 
@@ -48,11 +61,10 @@ def clean_username(username):
     if username.startswith("@"):
         username = username[1:]
 
-    return username.lower()
+    return username or None
 
 
 def safe_text(value):
-
     if value is None:
         return ""
 
@@ -63,55 +75,38 @@ def safe_text(value):
 # BALE API
 # =========================================================
 
-def bale(method, payload=None, timeout=30):
-
-    url = f"{BASE_URL}/{method}"
+def bale_request(method, data=None):
+    url = f"{BALE_API}/{method}"
 
     try:
-
         response = requests.post(
             url,
-            json=payload or {},
-            timeout=timeout
+            json=data or {},
+            timeout=30
         )
 
-        if response.status_code != 200:
+        response.raise_for_status()
 
-            print(
-                "BALE HTTP ERROR:",
-                response.status_code,
-                response.text
-            )
+        result = response.json()
 
-            return None
+        if not result.get("ok"):
+            print("BALE API ERROR:", method, result)
 
-        data = response.json()
-
-        if not data.get("ok"):
-
-            print(
-                "BALE API ERROR:",
-                data
-            )
-
-        return data
+        return result
 
     except Exception as e:
-
-        print(
-            "BALE REQUEST ERROR:",
-            e
-        )
-
-        return None
+        print("BALE REQUEST ERROR:", method, e)
+        return {
+            "ok": False,
+            "description": str(e)
+        }
 
 
 def send_message(chat_id, text):
-
-    if not chat_id:
+    if chat_id is None:
         return None
 
-    return bale(
+    result = bale_request(
         "sendMessage",
         {
             "chat_id": chat_id,
@@ -119,15 +114,76 @@ def send_message(chat_id, text):
         }
     )
 
+    if result.get("ok"):
+        return result.get("result")
+
+    return None
+
+
+def get_chat(chat_id):
+    result = bale_request(
+        "getChat",
+        {
+            "chat_id": chat_id
+        }
+    )
+
+    if result.get("ok"):
+        return result.get("result")
+
+    return None
+
 
 # =========================================================
-# SETTINGS
+# BALE MESSAGE LINK
+# =========================================================
+
+def build_bale_message_link(
+    username,
+    chat_id,
+    message_id
+):
+    """
+    لینک صحیح پیام بله
+
+    فرمت:
+    https://ble.ir/USERNAME/CHAT_ID/MESSAGE_ID
+
+    نمونه:
+    https://ble.ir/bargheiran/3274013777755998022/1788509875302
+    """
+
+    username = clean_username(username)
+
+    if not username:
+        return None
+
+    if chat_id is None:
+        return None
+
+    if message_id is None:
+        return None
+
+    chat_id = str(chat_id).strip()
+    message_id = str(message_id).strip()
+
+    if not chat_id or not message_id:
+        return None
+
+    return (
+        f"https://ble.ir/"
+        f"{username}/"
+        f"{chat_id}/"
+        f"{message_id}"
+    )
+
+
+# =========================================================
+# BOT SETTINGS
 # =========================================================
 
 def get_setting(key):
-
     try:
-
         result = (
             supabase
             .table("bot_settings")
@@ -138,33 +194,26 @@ def get_setting(key):
         )
 
         if result.data:
-
-            return result.data[0].get(
-                "value"
-            )
+            return result.data[0].get("value")
 
     except Exception as e:
-
-        print(
-            "GET SETTING ERROR:",
-            e
-        )
+        print("GET SETTING ERROR:", key, e)
 
     return None
 
 
-def save_setting(key, value):
-
+def set_setting(key, value):
     try:
+        data = {
+            "key": key,
+            "value": str(value)
+        }
 
         (
             supabase
             .table("bot_settings")
             .upsert(
-                {
-                    "key": key,
-                    "value": str(value)
-                },
+                data,
                 on_conflict="key"
             )
             .execute()
@@ -173,58 +222,112 @@ def save_setting(key, value):
         return True
 
     except Exception as e:
+        print("SET SETTING ERROR:", key, e)
+        return False
 
-        print(
-            "SAVE SETTING ERROR:",
-            e
+
+def load_owner():
+    global OWNER_ID
+
+    OWNER_ID = get_setting("owner_id")
+
+    if OWNER_ID:
+        OWNER_ID = str(OWNER_ID).strip()
+
+    print("OWNER_ID:", OWNER_ID)
+
+
+def save_selected_source(source):
+    global SELECTED_SOURCE
+
+    SELECTED_SOURCE = source or {}
+
+    if source.get("chat_id") is not None:
+        set_setting(
+            "selected_source_chat_id",
+            source["chat_id"]
         )
 
-        return False
+    if source.get("message_id") is not None:
+        set_setting(
+            "selected_source_message_id",
+            source["message_id"]
+        )
+
+    if source.get("username"):
+        set_setting(
+            "selected_source_username",
+            source["username"]
+        )
+
+    if source.get("title"):
+        set_setting(
+            "selected_source_title",
+            source["title"]
+        )
+
+    if source.get("link"):
+        set_setting(
+            "selected_source_link",
+            source["link"]
+        )
 
 
-# =========================================================
-# OWNER
-# =========================================================
+def load_selected_source():
+    global SELECTED_SOURCE
 
-OWNER_ID = get_setting(
-    "owner_id"
-)
-
-if OWNER_ID:
-
-    OWNER_ID = str(
-        OWNER_ID
-    ).strip()
-
-print(
-    "OWNER_ID:",
-    OWNER_ID
-)
-
-
-def is_owner(user_id):
-
-    if not OWNER_ID:
-        return False
-
-    return (
-        str(user_id)
-        == str(OWNER_ID)
+    chat_id = get_setting(
+        "selected_source_chat_id"
     )
 
+    message_id = get_setting(
+        "selected_source_message_id"
+    )
+
+    username = get_setting(
+        "selected_source_username"
+    )
+
+    title = get_setting(
+        "selected_source_title"
+    )
+
+    link = get_setting(
+        "selected_source_link"
+    )
+
+    if not chat_id or not message_id:
+        SELECTED_SOURCE = {}
+        return {}
+
+    # اگر لینک قدیمی یا ناقص است،
+    # لینک صحیح را دوباره می‌سازیم.
+    correct_link = build_bale_message_link(
+        username=username,
+        chat_id=chat_id,
+        message_id=message_id
+    )
+
+    SELECTED_SOURCE = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "username": username,
+        "title": title,
+        "link": correct_link or link
+    }
+
+    return SELECTED_SOURCE
+
 
 # =========================================================
-# BOT USERS
+# USER TRACKING
 # =========================================================
 
 def save_bot_user(chat):
-
     if not chat:
         return False
 
-    user_id = chat.get(
-        "id"
-    )
+    user_id = chat.get("id")
 
     if not user_id:
         return False
@@ -233,27 +336,17 @@ def save_bot_user(chat):
         chat.get("username")
     )
 
-    first_name = (
-        chat.get("first_name")
-        or ""
-    )
-
-    last_name = (
-        chat.get("last_name")
-        or ""
-    )
+    first_name = chat.get("first_name") or ""
+    last_name = chat.get("last_name") or ""
 
     try:
-
         data = {
             "user_id": str(user_id),
             "username": username,
             "first_name": first_name,
             "last_name": last_name,
             "active": True,
-            "updated_at": datetime.now(
-                timezone.utc
-            ).isoformat()
+            "updated_at": now_iso()
         }
 
         (
@@ -266,258 +359,57 @@ def save_bot_user(chat):
             .execute()
         )
 
-        print(
-            "USER SAVED:",
-            data
-        )
+        print("USER SAVED:", data)
 
         return True
 
     except Exception as e:
-
-        print(
-            "SAVE BOT USER ERROR:",
-            e
-        )
-
+        print("SAVE BOT USER ERROR:", e)
         return False
 
 
-def get_bot_user_by_id(user_id):
-
-    if not user_id:
-        return None
-
-    try:
-
-        result = (
-            supabase
-            .table("bot_users")
-            .select("*")
-            .eq(
-                "user_id",
-                str(user_id)
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-
-            return result.data[0]
-
-    except Exception as e:
-
-        print(
-            "GET USER BY ID ERROR:",
-            e
-        )
-
-    return None
-
-
-def get_bot_user_by_username(username):
-
-    username = clean_username(
-        username
-    )
-
-    if not username:
-        return None
-
-    try:
-
-        result = (
-            supabase
-            .table("bot_users")
-            .select("*")
-            .eq(
-                "username",
-                username
-            )
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-
-            return result.data[0]
-
-    except Exception as e:
-
-        print(
-            "GET USER BY USERNAME ERROR:",
-            e
-        )
-
-    return None
-
-
 # =========================================================
-# ADMIN SYSTEM
+# ACCESS CONTROL
 # =========================================================
+
+def is_owner(user_id):
+    if not OWNER_ID:
+        return False
+
+    return str(user_id) == str(OWNER_ID)
+
 
 def is_admin(user_id):
-
     if not user_id:
         return False
 
-    # Owner همیشه دسترسی کامل دارد
     if is_owner(user_id):
         return True
 
     try:
-
         result = (
             supabase
             .table("bot_admins")
             .select("id")
-            .eq(
-                "user_id",
-                str(user_id)
-            )
-            .eq(
-                "active",
-                True
-            )
+            .eq("user_id", str(user_id))
+            .eq("active", True)
             .limit(1)
             .execute()
         )
 
-        return bool(
-            result.data
-        )
+        return bool(result.data)
 
     except Exception as e:
-
-        print(
-            "IS ADMIN ERROR:",
-            e
-        )
-
+        print("IS ADMIN ERROR:", e)
         return False
 
-
-def add_admin(
-    user_id,
-    username=None,
-    first_name=None
-):
-
-    if not user_id:
-        return False
-
-    try:
-
-        data = {
-            "user_id": str(user_id),
-            "username": clean_username(
-                username
-            ),
-            "first_name": (
-                first_name
-                or ""
-            ),
-            "active": True
-        }
-
-        (
-            supabase
-            .table("bot_admins")
-            .upsert(
-                data,
-                on_conflict="user_id"
-            )
-            .execute()
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "ADD ADMIN ERROR:",
-            e
-        )
-
-        return False
-
-
-def remove_admin(user_id):
-
-    if not user_id:
-        return False
-
-    try:
-
-        (
-            supabase
-            .table("bot_admins")
-            .update(
-                {
-                    "active": False
-                }
-            )
-            .eq(
-                "user_id",
-                str(user_id)
-            )
-            .execute()
-        )
-
-        return True
-
-    except Exception as e:
-
-        print(
-            "REMOVE ADMIN ERROR:",
-            e
-        )
-
-        return False
-
-
-def get_admins():
-
-    try:
-
-        result = (
-            supabase
-            .table("bot_admins")
-            .select("*")
-            .eq(
-                "active",
-                True
-            )
-            .order(
-                "created_at"
-            )
-            .execute()
-        )
-
-        return result.data or []
-
-    except Exception as e:
-
-        print(
-            "GET ADMINS ERROR:",
-            e
-        )
-
-        return []
-
-
-# =========================================================
-# ACCESS DENIED
-# =========================================================
 
 def deny_access(chat_id):
-
     send_message(
         chat_id,
-        "⛔ شما مجاز به استفاده از این ربات نیستید.\n\n"
-        "اگر قصد دریافت User ID خود را دارید، "
-        "دستور /myid را ارسال کنید."
+        "⛔️ شما دسترسی استفاده از این ربات را ندارید.\n\n"
+        "برای دریافت شناسه کاربری خود دستور زیر را ارسال کنید:\n"
+        "/myid"
     )
 
 
@@ -526,710 +418,404 @@ def deny_access(chat_id):
 # =========================================================
 
 def show_my_id(chat_id):
-
-    user = get_bot_user_by_id(
-        chat_id
-    )
-
-    # اگر به هر دلیل رکورد در DB نبود،
-    # خود chat_id را نمایش می‌دهیم.
-    if not user:
-
-        send_message(
-            chat_id,
-            "🆔 اطلاعات حساب شما\n\n"
-            f"User ID: {chat_id}\n\n"
-            "همین User ID را برای مدیر ربات ارسال کنید."
+    try:
+        result = bale_request(
+            "getChat",
+            {
+                "chat_id": chat_id
+            }
         )
 
-        return
+        user = {}
 
-    username = clean_username(
-        user.get("username")
-    )
-
-    first_name = (
-        user.get("first_name")
-        or "بدون نام"
-    )
-
-    text = (
-        "🆔 اطلاعات حساب شما\n\n"
-        f"👤 نام: {first_name}\n"
-        f"🆔 User ID: {chat_id}\n"
-    )
-
-    if username:
-
-        text += (
-            f"🔹 Username: @{username}\n"
-        )
-
-    if is_owner(chat_id):
-
-        text += (
-            "\n👑 وضعیت: Owner"
-        )
-
-    elif is_admin(chat_id):
-
-        text += (
-            "\n🛡 وضعیت: Admin"
-        )
-
-    else:
-
-        text += (
-            "\n👤 وضعیت: کاربر عادی"
-        )
-
-    send_message(
-        chat_id,
-        text
-    )
-
-
-# =========================================================
-# ADD ADMIN
-# =========================================================
-
-def command_add_admin(
-    chat_id,
-    argument
-):
-
-    if not is_owner(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    argument = safe_text(
-        argument
-    )
-
-    if not argument:
-
-        send_message(
-            chat_id,
-            "❌ User ID یا Username را وارد کنید.\n\n"
-            "روش پیشنهادی:\n"
-            "/addadmin 123456789\n\n"
-            "یا:\n"
-            "/addadmin @username"
-        )
-
-        return
-
-    target_user = None
-
-    # =====================================================
-    # Numeric User ID
-    # =====================================================
-
-    if argument.isdigit():
-
-        target_user = get_bot_user_by_id(
-            argument
-        )
-
-        if not target_user:
-
-            send_message(
-                chat_id,
-                "❌ این User ID هنوز در ربات ثبت نشده است.\n\n"
-                "کاربر موردنظر باید حداقل یک‌بار برای ربات "
-                "پیام ارسال کند یا /myid را بزند."
-            )
-
-            return
-
-    # =====================================================
-    # Username
-    # =====================================================
-
-    else:
+        if result.get("ok"):
+            user = result.get("result") or {}
 
         username = clean_username(
-            argument
+            user.get("username")
         )
 
-        target_user = get_bot_user_by_username(
-            username
+        admin_status = is_admin(chat_id)
+
+        text = (
+            "🆔 اطلاعات کاربری شما\n\n"
+            f"User ID:\n{chat_id}\n\n"
+            f"Username:\n"
+            f"@{username if username else 'ندارد'}\n\n"
+            f"وضعیت دسترسی:\n"
+            f"{'✅ مدیر ربات' if admin_status else '❌ کاربر عادی'}"
         )
 
-        if not target_user:
+        send_message(
+            chat_id,
+            text
+        )
 
+    except Exception as e:
+        print("MY ID ERROR:", e)
+
+        send_message(
+            chat_id,
+            f"🆔 User ID شما:\n{chat_id}"
+        )
+
+
+# =========================================================
+# ADMIN MANAGEMENT
+# =========================================================
+
+def find_user_by_username(username):
+    username = clean_username(username)
+
+    if not username:
+        return None
+
+    try:
+        result = (
+            supabase
+            .table("bot_users")
+            .select("*")
+            .eq("username", username)
+            .eq("active", True)
+            .limit(1)
+            .execute()
+        )
+
+        if result.data:
+            return result.data[0]
+
+    except Exception as e:
+        print("FIND USER ERROR:", e)
+
+    return None
+
+
+def command_add_admin(chat_id, args):
+    if not is_owner(chat_id):
+        deny_access(chat_id)
+        return
+
+    if not args:
+        send_message(
+            chat_id,
+            "فرمت صحیح:\n"
+            "/addadmin USER_ID\n\n"
+            "مثال:\n"
+            "/addadmin 123456789"
+        )
+        return
+
+    target = args[0].strip()
+
+    target_user_id = None
+    target_username = None
+    target_first_name = ""
+
+    if target.startswith("@"):
+        user = find_user_by_username(target)
+
+        if not user:
             send_message(
                 chat_id,
-                "❌ این Username در فهرست کاربران ربات پیدا نشد.\n\n"
-                "از کاربر بخواهید ابتدا /myid را برای ربات "
-                "ارسال کند و User ID خودش را به شما بدهد.\n\n"
-                "سپس استفاده کنید:\n"
-                "/addadmin USER_ID"
+                "❌ این کاربر قبلاً به ربات پیام نداده است "
+                "یا در فهرست کاربران پیدا نشد.\n\n"
+                "از کاربر بخواهید ابتدا /myid را ارسال کند."
             )
-
             return
 
-    target_id = target_user.get(
-        "user_id"
-    )
-
-    target_username = target_user.get(
-        "username"
-    )
-
-    target_first_name = (
-        target_user.get("first_name")
-        or ""
-    )
-
-    if is_owner(target_id):
-
-        send_message(
-            chat_id,
-            "👑 این کاربر Owner ربات است."
-        )
-
-        return
-
-    if is_admin(target_id):
-
-        send_message(
-            chat_id,
-            "ℹ️ این کاربر از قبل Admin است."
-        )
-
-        return
-
-    success = add_admin(
-        target_id,
-        target_username,
-        target_first_name
-    )
-
-    if not success:
-
-        send_message(
-            chat_id,
-            "❌ افزودن Admin انجام نشد."
-        )
-
-        return
-
-    display_name = (
-        target_first_name
-        or "بدون نام"
-    )
-
-    text = (
-        "✅ Admin با موفقیت اضافه شد.\n\n"
-        f"👤 نام: {display_name}\n"
-        f"🆔 User ID: {target_id}\n"
-    )
-
-    if target_username:
-
-        text += (
-            f"🔹 Username: @{target_username}\n"
-        )
-
-    send_message(
-        chat_id,
-        text
-    )
-
-
-# =========================================================
-# REMOVE ADMIN
-# =========================================================
-
-def command_remove_admin(
-    chat_id,
-    argument
-):
-
-    if not is_owner(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    argument = safe_text(
-        argument
-    )
-
-    if not argument:
-
-        send_message(
-            chat_id,
-            "❌ User ID یا Username را وارد کنید.\n\n"
-            "مثال:\n"
-            "/removeadmin 123456789"
-        )
-
-        return
-
-    target_user = None
-
-    if argument.isdigit():
-
-        target_user = get_bot_user_by_id(
-            argument
-        )
+        target_user_id = user.get("user_id")
+        target_username = user.get("username")
+        target_first_name = user.get("first_name") or ""
 
     else:
+        target_user_id = target
 
-        target_user = get_bot_user_by_username(
-            argument
+        try:
+            result = (
+                supabase
+                .table("bot_users")
+                .select("*")
+                .eq("user_id", str(target_user_id))
+                .limit(1)
+                .execute()
+            )
+
+            if result.data:
+                user = result.data[0]
+                target_username = user.get("username")
+                target_first_name = user.get("first_name") or ""
+
+        except Exception as e:
+            print("GET TARGET USER ERROR:", e)
+
+    if not str(target_user_id).isdigit():
+        send_message(
+            chat_id,
+            "❌ شناسه کاربری باید عددی باشد."
+        )
+        return
+
+    try:
+        existing = (
+            supabase
+            .table("bot_admins")
+            .select("id")
+            .eq("user_id", str(target_user_id))
+            .limit(1)
+            .execute()
         )
 
-    if not target_user:
+        if existing.data:
+            (
+                supabase
+                .table("bot_admins")
+                .update({
+                    "active": True,
+                    "username": target_username,
+                    "first_name": target_first_name
+                })
+                .eq("user_id", str(target_user_id))
+                .execute()
+            )
+        else:
+            (
+                supabase
+                .table("bot_admins")
+                .insert({
+                    "user_id": str(target_user_id),
+                    "username": target_username,
+                    "first_name": target_first_name,
+                    "active": True,
+                    "created_at": now_iso()
+                })
+                .execute()
+            )
 
         send_message(
             chat_id,
-            "❌ کاربر پیدا نشد."
+            "✅ کاربر با موفقیت به مدیران ربات اضافه شد.\n\n"
+            f"User ID: {target_user_id}\n"
+            f"Username: "
+            f"@{target_username if target_username else 'ندارد'}"
         )
 
-        return
-
-    target_id = target_user.get(
-        "user_id"
-    )
-
-    if is_owner(target_id):
+    except Exception as e:
+        print("ADD ADMIN ERROR:", e)
 
         send_message(
             chat_id,
-            "⛔ Owner را نمی‌توان حذف کرد."
+            f"❌ خطا در افزودن مدیر:\n{e}"
         )
 
+
+def command_remove_admin(chat_id, args):
+    if not is_owner(chat_id):
+        deny_access(chat_id)
         return
 
-    if not is_admin(target_id):
+    if not args:
+        send_message(
+            chat_id,
+            "فرمت صحیح:\n"
+            "/removeadmin USER_ID"
+        )
+        return
+
+    target_user_id = args[0].strip()
+
+    if not target_user_id.isdigit():
+        send_message(
+            chat_id,
+            "❌ شناسه کاربری باید عددی باشد."
+        )
+        return
+
+    if is_owner(target_user_id):
+        send_message(
+            chat_id,
+            "❌ مالک ربات را نمی‌توان حذف کرد."
+        )
+        return
+
+    try:
+        result = (
+            supabase
+            .table("bot_admins")
+            .update({
+                "active": False
+            })
+            .eq("user_id", str(target_user_id))
+            .execute()
+        )
+
+        if result.data:
+            send_message(
+                chat_id,
+                "✅ دسترسی مدیر با موفقیت حذف شد."
+            )
+        else:
+            send_message(
+                chat_id,
+                "❌ این کاربر مدیر نیست."
+            )
+
+    except Exception as e:
+        print("REMOVE ADMIN ERROR:", e)
 
         send_message(
             chat_id,
-            "ℹ️ این کاربر Admin نیست."
+            f"❌ خطا:\n{e}"
         )
 
-        return
-
-    success = remove_admin(
-        target_id
-    )
-
-    if not success:
-
-        send_message(
-            chat_id,
-            "❌ حذف Admin انجام نشد."
-        )
-
-        return
-
-    send_message(
-        chat_id,
-        f"✅ Admin با User ID {target_id} حذف شد."
-    )
-
-
-# =========================================================
-# LIST ADMINS
-# =========================================================
 
 def command_list_admins(chat_id):
-
     if not is_owner(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
+        deny_access(chat_id)
         return
 
-    admins = get_admins()
-
-    text = (
-        "🛡 لیست Adminهای فعال\n\n"
-    )
-
-    if not admins:
-
-        text += (
-            "هیچ Admin فعالی وجود ندارد."
-        )
-
-    else:
-
-        for index, admin in enumerate(
-            admins,
-            start=1
-        ):
-
-            user_id = admin.get(
-                "user_id",
-                "-"
-            )
-
-            username = clean_username(
-                admin.get("username")
-            )
-
-            first_name = (
-                admin.get("first_name")
-                or "بدون نام"
-            )
-
-            text += (
-                f"{index}. {first_name}\n"
-                f"🆔 {user_id}\n"
-            )
-
-            if username:
-
-                text += (
-                    f"🔹 @{username}\n"
-                )
-
-            text += "\n"
-
-    send_message(
-        chat_id,
-        text
-    )
-
-
-# =========================================================
-# JALALI DATE
-# =========================================================
-
-def gregorian_to_jalali(
-    gy,
-    gm,
-    gd
-):
-
-    g_days_in_month = [
-        31, 28, 31, 30, 31, 30,
-        31, 31, 30, 31, 30, 31
-    ]
-
-    j_days_in_month = [
-        31, 31, 31, 31, 31, 31,
-        30, 30, 30, 30, 30, 29
-    ]
-
-    gy -= 1600
-    gm -= 1
-    gd -= 1
-
-    g_day_no = (
-        365 * gy
-        + (gy + 3) // 4
-        - (gy + 99) // 100
-        + (gy + 399) // 400
-    )
-
-    for i in range(gm):
-
-        g_day_no += (
-            g_days_in_month[i]
-        )
-
-    if (
-        gm > 1
-        and (
-            (gy + 1600) % 4 == 0
-            and (
-                (gy + 1600) % 100 != 0
-                or (gy + 1600) % 400 == 0
-            )
-        )
-    ):
-
-        g_day_no += 1
-
-    g_day_no += gd
-
-    j_day_no = (
-        g_day_no - 79
-    )
-
-    j_np = (
-        j_day_no // 12053
-    )
-
-    j_day_no %= 12053
-
-    jy = (
-        979
-        + 33 * j_np
-        + 4 * (
-            j_day_no // 1461
-        )
-    )
-
-    j_day_no %= 1461
-
-    if j_day_no >= 366:
-
-        jy += (
-            (j_day_no - 1)
-            // 365
-        )
-
-        j_day_no = (
-            (j_day_no - 1)
-            % 365
-        )
-
-    i = 0
-
-    while (
-        i < 11
-        and j_day_no
-        >= j_days_in_month[i]
-    ):
-
-        j_day_no -= (
-            j_days_in_month[i]
-        )
-
-        i += 1
-
-    jm = i + 1
-    jd = j_day_no + 1
-
-    return jy, jm, jd
-
-
-def format_jalali_datetime(value):
-
-    if not value:
-        return "-"
-
     try:
-
-        dt = datetime.fromisoformat(
-            str(value).replace(
-                "Z",
-                "+00:00"
-            )
-        )
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
-
-        iran = timezone(
-            timedelta(
-                hours=3,
-                minutes=30
-            )
-        )
-
-        dt = dt.astimezone(
-            iran
-        )
-
-        jy, jm, jd = gregorian_to_jalali(
-            dt.year,
-            dt.month,
-            dt.day
-        )
-
-        return (
-            f"{jy:04d}/{jm:02d}/{jd:02d} "
-            f"{dt.hour:02d}:{dt.minute:02d}"
-        )
-
-    except Exception:
-
-        return str(value)
-
-
-# =========================================================
-# CHANNELS
-# =========================================================
-
-def get_channels():
-
-    try:
-
         result = (
             supabase
-            .table("channels")
+            .table("bot_admins")
             .select("*")
+            .eq("active", True)
             .order("id")
             .execute()
         )
 
-        return result.data or []
+        lines = [
+            "👥 فهرست مدیران ربات",
+            ""
+        ]
 
-    except Exception as e:
-
-        print(
-            "GET CHANNELS ERROR:",
-            e
-        )
-
-        return []
-
-
-def get_active_channels():
-
-    try:
-
-        result = (
-            supabase
-            .table("channels")
-            .select("*")
-            .eq(
-                "active",
-                True
+        if OWNER_ID:
+            lines.append(
+                f"👑 مالک:\n{OWNER_ID}"
             )
-            .order("id")
-            .execute()
-        )
-
-        return result.data or []
-
-    except Exception as e:
-
-        print(
-            "GET ACTIVE CHANNELS ERROR:",
-            e
-        )
-
-        return []
-
-
-def get_channel_by_username(username):
-
-    username = clean_username(
-        username
-    )
-
-    if not username:
-        return None
-
-    try:
-
-        result = (
-            supabase
-            .table("channels")
-            .select("*")
-            .eq(
-                "username",
-                username
-            )
-            .limit(1)
-            .execute()
-        )
 
         if result.data:
+            lines.append("")
+            lines.append("🛡 مدیران:")
 
-            return result.data[0]
+            for index, admin in enumerate(
+                result.data,
+                start=1
+            ):
+                user_id = admin.get("user_id")
+                username = clean_username(
+                    admin.get("username")
+                )
+                first_name = admin.get(
+                    "first_name"
+                ) or ""
 
-    except Exception as e:
+                name = first_name
 
-        print(
-            "GET CHANNEL USERNAME ERROR:",
-            e
+                if username:
+                    name += f" (@{username})"
+
+                if not name:
+                    name = "بدون نام"
+
+                lines.append(
+                    f"{index}. {name}\n"
+                    f"   ID: {user_id}"
+                )
+        else:
+            lines.append("")
+            lines.append(
+                "هیچ مدیر دیگری ثبت نشده است."
+            )
+
+        send_message(
+            chat_id,
+            "\n".join(lines)
         )
 
-    return None
+    except Exception as e:
+        print("LIST ADMINS ERROR:", e)
+
+        send_message(
+            chat_id,
+            f"❌ خطا:\n{e}"
+        )
 
 
-def get_channel_by_chat_id(chat_id):
+# =========================================================
+# CHANNEL MANAGEMENT
+# =========================================================
 
-    if not chat_id:
-        return None
+def add_channel(chat_id, username):
+    username = clean_username(username)
+
+    if not username:
+        send_message(
+            chat_id,
+            "❌ نام کاربری کانال صحیح نیست."
+        )
+        return
+
+    channel = get_chat(
+        f"@{username}"
+    )
+
+    if not channel:
+        send_message(
+            chat_id,
+            "❌ کانال پیدا نشد.\n\n"
+            "مطمئن شوید ربات در کانال عضو/مدیر است."
+        )
+        return
+
+    channel_chat_id = channel.get("id")
+    channel_username = clean_username(
+        channel.get("username")
+    )
+    channel_title = (
+        channel.get("title")
+        or channel.get("first_name")
+        or username
+    )
+
+    if not channel_chat_id:
+        send_message(
+            chat_id,
+            "❌ شناسه کانال دریافت نشد."
+        )
+        return
 
     try:
-
-        result = (
+        existing = (
             supabase
             .table("channels")
-            .select("*")
+            .select("id")
             .eq(
                 "chat_id",
-                str(chat_id)
+                str(channel_chat_id)
             )
             .limit(1)
             .execute()
-        )
-
-        if result.data:
-
-            return result.data[0]
-
-    except Exception as e:
-
-        print(
-            "GET CHANNEL CHAT ID ERROR:",
-            e
-        )
-
-    return None
-
-
-def add_channel(
-    username,
-    title=None,
-    chat_id=None
-):
-
-    username = clean_username(
-        username
-    )
-
-    if not username:
-        return False
-
-    try:
-
-        existing = get_channel_by_username(
-            username
         )
 
         data = {
-            "username": username,
-            "title": (
-                title
-                or username
-            ),
+            "chat_id": str(channel_chat_id),
+            "username": channel_username or username,
+            "title": channel_title,
             "active": True
         }
 
-        if chat_id:
-
-            data["chat_id"] = str(
-                chat_id
-            )
-
-        if existing:
-
+        if existing.data:
             (
                 supabase
                 .table("channels")
                 .update(data)
                 .eq(
-                    "id",
-                    existing["id"]
+                    "chat_id",
+                    str(channel_chat_id)
                 )
                 .execute()
             )
-
         else:
-
             (
                 supabase
                 .table("channels")
@@ -1237,409 +823,120 @@ def add_channel(
                 .execute()
             )
 
-        return True
-
-    except Exception as e:
-
-        print(
-            "ADD CHANNEL ERROR:",
-            e
+        send_message(
+            chat_id,
+            "✅ کانال با موفقیت ثبت شد.\n\n"
+            f"📢 {channel_title}\n"
+            f"@{channel_username or username}\n"
+            f"🆔 {channel_chat_id}"
         )
 
-        return False
+    except Exception as e:
+        print("ADD CHANNEL ERROR:", e)
+
+        send_message(
+            chat_id,
+            f"❌ خطا در ثبت کانال:\n{e}"
+        )
 
 
-def remove_channel(username):
-
-    username = clean_username(
-        username
-    )
-
-    if not username:
-        return False
-
+def list_channels(chat_id):
     try:
-
-        (
+        result = (
             supabase
             .table("channels")
-            .update(
-                {
-                    "active": False
-                }
-            )
-            .eq(
-                "username",
-                username
-            )
+            .select("*")
+            .eq("active", True)
+            .order("id")
+            .limit(100)
             .execute()
         )
 
-        return True
+        if not result.data:
+            send_message(
+                chat_id,
+                "📢 هیچ کانال فعالی ثبت نشده است."
+            )
+            return
+
+        lines = [
+            "📢 کانال‌های فعال:",
+            ""
+        ]
+
+        for index, channel in enumerate(
+            result.data,
+            start=1
+        ):
+            title = channel.get("title") or "-"
+            username = clean_username(
+                channel.get("username")
+            )
+            channel_chat_id = (
+                channel.get("chat_id")
+                or channel.get("id")
+            )
+
+            lines.append(
+                f"{index}. {title}\n"
+                f"   @{username or '-'}\n"
+                f"   ID: {channel_chat_id}"
+            )
+
+        send_message(
+            chat_id,
+            "\n".join(lines)
+        )
 
     except Exception as e:
+        print("LIST CHANNEL ERROR:", e)
 
-        print(
-            "REMOVE CHANNEL ERROR:",
-            e
-        )
-
-        return False
-
-
-# =========================================================
-# BALE CHAT
-# =========================================================
-
-def get_chat(chat_id):
-
-    if not chat_id:
-        return None
-
-    result = bale(
-        "getChat",
-        {
-            "chat_id": chat_id
-        }
-    )
-
-    if not result:
-        return None
-
-    if not result.get("ok"):
-        return None
-
-    return result.get(
-        "result"
-    )
-
-
-def resolve_destination_channel(chat):
-
-    if not chat:
-        return None
-
-    chat_id = chat.get(
-        "id"
-    )
-
-    username = clean_username(
-        chat.get("username")
-    )
-
-    title = (
-        chat.get("title")
-        or username
-        or str(chat_id)
-    )
-
-    # =====================================================
-    # 1. chat_id
-    # =====================================================
-
-    existing = get_channel_by_chat_id(
-        chat_id
-    )
-
-    if existing:
-
-        return {
-            "chat_id": str(
-                existing.get("chat_id")
-                or chat_id
-            ),
-            "username": clean_username(
-                existing.get("username")
-            ),
-            "title": (
-                existing.get("title")
-                or title
-            )
-        }
-
-    # =====================================================
-    # 2. username
-    # =====================================================
-
-    if username:
-
-        existing = get_channel_by_username(
-            username
-        )
-
-        if existing:
-
-            return {
-                "chat_id": str(
-                    existing.get("chat_id")
-                    or chat_id
-                ),
-                "username": clean_username(
-                    existing.get("username")
-                ),
-                "title": (
-                    existing.get("title")
-                    or title
-                )
-            }
-
-    # =====================================================
-    # 3. Active channels
-    # =====================================================
-
-    for channel in get_active_channels():
-
-        stored_chat_id = str(
-            channel.get("chat_id")
-            or ""
-        )
-
-        stored_username = clean_username(
-            channel.get("username")
-        )
-
-        if (
-            stored_chat_id
-            and chat_id
-            and stored_chat_id
-            == str(chat_id)
-        ):
-
-            return {
-                "chat_id": str(chat_id),
-                "username": stored_username,
-                "title": (
-                    channel.get("title")
-                    or title
-                )
-            }
-
-        if (
-            stored_username
-            and username
-            and stored_username
-            == username
-        ):
-
-            return {
-                "chat_id": str(
-                    channel.get("chat_id")
-                    or chat_id
-                ),
-                "username": stored_username,
-                "title": (
-                    channel.get("title")
-                    or title
-                )
-            }
-
-    # =====================================================
-    # 4. getChat
-    # =====================================================
-
-    fetched = get_chat(
-        chat_id
-    )
-
-    if fetched:
-
-        fetched_username = clean_username(
-            fetched.get("username")
-        )
-
-        fetched_title = (
-            fetched.get("title")
-            or fetched_username
-            or title
-        )
-
-        existing = None
-
-        if fetched_username:
-
-            existing = get_channel_by_username(
-                fetched_username
-            )
-
-        if existing:
-
-            return {
-                "chat_id": str(
-                    existing.get("chat_id")
-                    or chat_id
-                ),
-                "username": (
-                    clean_username(
-                        existing.get("username")
-                    )
-                    or fetched_username
-                ),
-                "title": (
-                    existing.get("title")
-                    or fetched_title
-                )
-            }
-
-        return {
-            "chat_id": str(
-                fetched.get("id")
-                or chat_id
-            ),
-            "username": fetched_username,
-            "title": fetched_title
-        }
-
-    return {
-        "chat_id": (
-            str(chat_id)
-            if chat_id
-            else None
-        ),
-        "username": username,
-        "title": title
-    }
-
-
-# =========================================================
-# SOURCE MESSAGE
-# =========================================================
-
-def save_source_message(
-    message_id,
-    title=None,
-    link=None,
-    source_username=None,
-    source_chat_id=None
-):
-
-    save_setting(
-        "selected_source_message_id",
-        message_id
-    )
-
-    save_setting(
-        "selected_source_title",
-        title or ""
-    )
-
-    save_setting(
-        "selected_source_link",
-        link or ""
-    )
-
-    save_setting(
-        "selected_source_username",
-        clean_username(
-            source_username
-        )
-        or ""
-    )
-
-    if source_chat_id:
-
-        save_setting(
-            "selected_source_chat_id",
-            source_chat_id
+        send_message(
+            chat_id,
+            f"❌ خطا:\n{e}"
         )
 
 
-def get_selected_source():
-
-    return {
-        "message_id": get_setting(
-            "selected_source_message_id"
-        ),
-        "title": get_setting(
-            "selected_source_title"
-        ),
-        "link": get_setting(
-            "selected_source_link"
-        ),
-        "username": get_setting(
-            "selected_source_username"
-        ),
-        "chat_id": get_setting(
-            "selected_source_chat_id"
-        )
-    }
-
-
-# =========================================================
-# BALE LINK
-# =========================================================
-
-def normalize_bale_link(
-    username,
-    message_id
-):
-
-    username = clean_username(
-        username
-    )
+def remove_channel(chat_id, username):
+    username = clean_username(username)
 
     if not username:
-        return None
-
-    if not message_id:
-        return None
-
-    return (
-        f"https://ble.ir/"
-        f"{username}/"
-        f"{message_id}"
-    )
-
-
-def extract_message_link(message):
-
-    if not message:
-        return None
-
-    entities = (
-        message.get(
-            "entities"
+        send_message(
+            chat_id,
+            "فرمت صحیح:\n"
+            "/removechannel @channel"
         )
-        or []
-    )
+        return
 
-    text = (
-        message.get("text")
-        or message.get("caption")
-        or ""
-    )
+    try:
+        result = (
+            supabase
+            .table("channels")
+            .update({
+                "active": False
+            })
+            .eq("username", username)
+            .execute()
+        )
 
-    for entity in entities:
-
-        if (
-            entity.get("type")
-            == "text_link"
-        ):
-
-            url = entity.get(
-                "url"
+        if result.data:
+            send_message(
+                chat_id,
+                "✅ کانال غیرفعال شد."
+            )
+        else:
+            send_message(
+                chat_id,
+                "❌ کانال پیدا نشد."
             )
 
-            if url:
+    except Exception as e:
+        print("REMOVE CHANNEL ERROR:", e)
 
-                return url
-
-    urls = re.findall(
-        r'https?://[^\s]+',
-        text
-    )
-
-    for url in urls:
-
-        if (
-            "ble.ir" in url
-            or "bale.ai" in url
-        ):
-
-            return url.rstrip(
-                ".,،؛"
-            )
-
-    return None
+        send_message(
+            chat_id,
+            f"❌ خطا:\n{e}"
+        )
 
 
 # =========================================================
@@ -1647,74 +944,66 @@ def extract_message_link(message):
 # =========================================================
 
 def extract_forward(message):
-
     result = {
-        "message_id": None,
+        "chat_id": None,
         "username": None,
         "title": None,
-        "link": None,
-        "chat_id": None
+        "message_id": None,
+        "link": None
     }
 
     if not message:
         return result
 
-    # =====================================================
+    # -----------------------------------------------------
     # New forward structure
-    # =====================================================
+    # -----------------------------------------------------
 
-    origin = message.get(
+    forward_origin = message.get(
         "forward_origin"
     )
 
-    if origin:
-
-        origin_type = origin.get(
+    if forward_origin:
+        origin_type = forward_origin.get(
             "type"
         )
 
         if origin_type == "channel":
-
-            result["message_id"] = (
-                origin.get(
-                    "message_id"
-                )
-            )
-
-            chat = (
-                origin.get("chat")
+            source_chat = (
+                forward_origin.get("chat")
                 or {}
             )
 
-            result["chat_id"] = (
-                chat.get("id")
+            result["chat_id"] = source_chat.get(
+                "id"
             )
 
             result["username"] = clean_username(
-                chat.get("username")
+                source_chat.get("username")
             )
 
             result["title"] = (
-                chat.get("title")
+                source_chat.get("title")
+                or source_chat.get("first_name")
                 or result["username"]
             )
 
-    # =====================================================
-    # Old forward structure
-    # =====================================================
+            result["message_id"] = (
+                forward_origin.get("message_id")
+            )
 
-    if not result["message_id"]:
+    # -----------------------------------------------------
+    # Legacy forward structure
+    # -----------------------------------------------------
 
+    if not result["chat_id"]:
         forward_from_chat = message.get(
             "forward_from_chat"
         )
 
         if forward_from_chat:
-
             result["chat_id"] = (
-                forward_from_chat.get(
-                    "id"
-                )
+                forward_from_chat.get("id")
             )
 
             result["username"] = clean_username(
@@ -1724,31 +1013,28 @@ def extract_forward(message):
             )
 
             result["title"] = (
-                forward_from_chat.get(
-                    "title"
+                forward_from_chat.get("title")
+                or forward_from_chat.get(
+                    "first_name"
                 )
                 or result["username"]
             )
 
             result["message_id"] = (
-                message.get(
-                    "forward_from_message_id"
-                )
+                message.get("forward_from_message_id")
             )
 
-    # =====================================================
-    # Link
-    # =====================================================
+    # -----------------------------------------------------
+    # Final link
+    # -----------------------------------------------------
 
-    if (
-        result["username"]
-        and result["message_id"]
-    ):
+    result["link"] = build_bale_message_link(
+        username=result["username"],
+        chat_id=result["chat_id"],
+        message_id=result["message_id"]
+    )
 
-        result["link"] = normalize_bale_link(
-            result["username"],
-            result["message_id"]
-        )
+    print("FORWARD EXTRACTED:", result)
 
     return result
 
@@ -1758,180 +1044,146 @@ def extract_forward(message):
 # =========================================================
 
 def process_private_forward(message):
-
-    chat = (
-        message.get("chat")
-        or {}
-    )
-
-    chat_id = chat.get(
-        "id"
-    )
-
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
+    chat = message.get("chat") or {}
+    user_chat_id = chat.get("id")
 
     forward = extract_forward(
         message
     )
 
-    if not forward.get(
-        "message_id"
-    ):
-
+    if not forward.get("message_id"):
         send_message(
-            chat_id,
-            "❌ پست فورواردشده معتبر نیست.\n\n"
-            "لطفاً پست موردنظر را مستقیماً "
-            "از کانال برای ربات Forward کنید."
+            user_chat_id,
+            "❌ پیام فورواردشده قابل شناسایی نیست."
         )
-
         return
 
-    source_username = clean_username(
-        forward.get("username")
+    save_selected_source(
+        forward
     )
 
-    source_title = (
+    title = (
         forward.get("title")
-        or source_username
-        or "کانال مرجع"
+        or forward.get("username")
+        or "بدون عنوان"
     )
 
-    source_message_id = forward.get(
-        "message_id"
-    )
-
-    source_link = forward.get(
-        "link"
-    )
-
-    source_chat_id = forward.get(
-        "chat_id"
-    )
-
-    save_source_message(
-        message_id=source_message_id,
-        title=source_title,
-        link=source_link,
-        source_username=source_username,
-        source_chat_id=source_chat_id
-    )
-
-    text = (
-        "✅ پست مرجع با موفقیت انتخاب شد.\n\n"
-        f"📢 کانال: {source_title}\n"
-        f"🆔 Message ID: {source_message_id}\n"
-    )
-
-    if source_username:
-
-        text += (
-            f"🔹 @{source_username}\n"
-        )
-
-    if source_link:
-
-        text += (
-            f"🔗 {source_link}\n"
-        )
-
-    text += (
-        "\nحالا دستور /report را ارسال کنید "
-        "تا بازنشرهای همین پست نمایش داده شود."
+    link = (
+        forward.get("link")
+        or "لینک قابل ساخت نیست"
     )
 
     send_message(
-        chat_id,
-        text
+        user_chat_id,
+        "✅ پیام مرجع با موفقیت انتخاب شد.\n\n"
+        f"📢 کانال:\n"
+        f"{title}\n\n"
+        f"🆔 Channel ID:\n"
+        f"{forward.get('chat_id')}\n\n"
+        f"📝 Message ID:\n"
+        f"{forward.get('message_id')}\n\n"
+        f"🔗 لینک پیام:\n"
+        f"{link}\n\n"
+        "اکنون برای مشاهده گزارش بازنشرها "
+        "دستور /report را ارسال کنید."
     )
 
 
 # =========================================================
-# SAVE REPOST
+# DESTINATION CHANNEL RESOLUTION
 # =========================================================
 
-def save_repost(
-    source_channel_id,
-    source_username,
-    source_message_id,
-    destination_channel_id,
-    destination_username,
-    destination_message_id,
-    destination_title,
-    message_title
-):
+def resolve_destination_channel(chat):
+    if not chat:
+        return None
 
-    try:
+    channel_chat_id = chat.get("id")
 
-        data = {
+    username = clean_username(
+        chat.get("username")
+    )
 
-            "source_channel_id": (
-                str(source_channel_id)
-                if source_channel_id
-                else None
-            ),
+    # -----------------------------------------------------
+    # First: exact chat_id
+    # -----------------------------------------------------
 
-            "source_username": clean_username(
-                source_username
-            ),
+    if channel_chat_id is not None:
+        try:
+            result = (
+                supabase
+                .table("channels")
+                .select("*")
+                .eq(
+                    "chat_id",
+                    str(channel_chat_id)
+                )
+                .eq("active", True)
+                .limit(1)
+                .execute()
+            )
 
-            "source_message_id": str(
-                source_message_id
-            ),
+            if result.data:
+                return result.data[0]
 
-            "destination_channel_id": (
-                str(destination_channel_id)
-                if destination_channel_id
-                else None
-            ),
+        except Exception as e:
+            print(
+                "RESOLVE CHANNEL BY ID ERROR:",
+                e
+            )
 
-            "destination_username": clean_username(
-                destination_username
-            ),
+    # -----------------------------------------------------
+    # Second: username
+    # -----------------------------------------------------
 
-            "destination_message_id": str(
-                destination_message_id
-            ),
+    if username:
+        try:
+            result = (
+                supabase
+                .table("channels")
+                .select("*")
+                .eq("username", username)
+                .eq("active", True)
+                .limit(1)
+                .execute()
+            )
 
-            "destination_title": (
-                destination_title
-                or destination_username
-                or str(destination_channel_id)
-            ),
+            if result.data:
+                channel = result.data[0]
 
-            "message_title": (
-                message_title
-                or ""
-            ),
+                # اگر chat_id خالی بوده،
+                # همین‌جا آن را تکمیل می‌کنیم.
+                if (
+                    not channel.get("chat_id")
+                    and channel_chat_id is not None
+                ):
+                    (
+                        supabase
+                        .table("channels")
+                        .update({
+                            "chat_id": str(
+                                channel_chat_id
+                            )
+                        })
+                        .eq(
+                            "id",
+                            channel.get("id")
+                        )
+                        .execute()
+                    )
 
-            "created_at": datetime.now(
-                timezone.utc
-            ).isoformat()
-        }
+                    channel["chat_id"] = str(
+                        channel_chat_id
+                    )
 
-        (
-            supabase
-            .table("reposts")
-            .insert(data)
-            .execute()
-        )
+                return channel
 
-        return True
+        except Exception as e:
+            print(
+                "RESOLVE CHANNEL BY USERNAME ERROR:",
+                e
+            )
 
-    except Exception as e:
-
-        print(
-            "SAVE REPOST ERROR:",
-            e
-        )
-
-        return False
+    return None
 
 
 # =========================================================
@@ -1939,7 +1191,6 @@ def save_repost(
 # =========================================================
 
 def get_message_title(message):
-
     if not message:
         return "بدون عنوان"
 
@@ -1952,54 +1203,102 @@ def get_message_title(message):
     text = text.strip()
 
     if not text:
-
         return "بدون عنوان"
 
-    first_line = (
-        text.split(
-            "\n",
-            1
-        )[0]
-        .strip()
-    )
+    # فقط خط اول
+    title = text.splitlines()[0].strip()
 
-    if len(first_line) > 120:
+    if len(title) > 100:
+        title = title[:100] + "..."
 
-        first_line = (
-            first_line[:117]
-            + "..."
-        )
-
-    return first_line
+    return title
 
 
 # =========================================================
-# CHANNEL MESSAGE
+# SAVE REPOST
+# =========================================================
+
+def save_repost(
+    source,
+    destination,
+    destination_message_id,
+    message_title
+):
+    try:
+        destination_chat_id = (
+            destination.get("chat_id")
+            or destination.get("id")
+        )
+
+        destination_username = clean_username(
+            destination.get("username")
+        )
+
+        destination_title = (
+            destination.get("title")
+            or destination_username
+            or "بدون عنوان"
+        )
+
+        data = {
+            "source_channel_id": str(
+                source.get("chat_id")
+            ),
+            "source_username": clean_username(
+                source.get("username")
+            ),
+            "source_message_id": str(
+                source.get("message_id")
+            ),
+            "destination_channel_id": str(
+                destination_chat_id
+            ),
+            "destination_username":
+                destination_username,
+            "destination_message_id": str(
+                destination_message_id
+            ),
+            "destination_title":
+                destination_title,
+            "message_title":
+                message_title,
+            "created_at": now_iso()
+        }
+
+        (
+            supabase
+            .table("reposts")
+            .insert(data)
+            .execute()
+        )
+
+        print("REPOST SAVED:", data)
+
+        return True
+
+    except Exception as e:
+        print("SAVE REPOST ERROR:", e)
+        return False
+
+
+# =========================================================
+# PROCESS CHANNEL MESSAGE
 # =========================================================
 
 def process_channel_message(message):
+    chat = message.get("chat") or {}
 
-    if not message:
+    destination = resolve_destination_channel(
+        chat
+    )
+
+    if not destination:
         return
 
-    chat = (
-        message.get("chat")
-        or {}
-    )
+    source = load_selected_source()
 
-    chat_id = chat.get(
-        "id"
-    )
-
-    username = clean_username(
-        chat.get("username")
-    )
-
-    title = (
-        chat.get("title")
-        or username
-        or str(chat_id)
-    )
+    if not source.get("message_id"):
+        return
 
     message_id = message.get(
         "message_id"
@@ -2008,152 +1307,27 @@ def process_channel_message(message):
     if not message_id:
         return
 
-    # =====================================================
-    # Check active channel
-    # =====================================================
-
-    active_channels = get_active_channels()
-
-    matched_channel = None
-
-    for channel in active_channels:
-
-        stored_chat_id = str(
-            channel.get("chat_id")
-            or ""
-        )
-
-        stored_username = clean_username(
-            channel.get("username")
-        )
-
-        if (
-            stored_chat_id
-            and chat_id
-            and stored_chat_id
-            == str(chat_id)
-        ):
-
-            matched_channel = channel
-
-            break
-
-        if (
-            stored_username
-            and username
-            and stored_username
-            == username
-        ):
-
-            matched_channel = channel
-
-            break
-
-    if not matched_channel:
-
-        return
-
-    # =====================================================
-    # Source
-    # =====================================================
-
-    source = get_selected_source()
-
-    source_message_id = source.get(
-        "message_id"
-    )
-
-    source_username = clean_username(
-        source.get("username")
-    )
-
-    source_chat_id = source.get(
-        "chat_id"
-    )
-
-    if not source_message_id:
-
-        return
-
-    # =====================================================
-    # Forward
-    # =====================================================
-
-    forward = extract_forward(
+    message_title = get_message_title(
         message
     )
 
-    forwarded_message_id = (
-        forward.get("message_id")
+    saved = save_repost(
+        source=source,
+        destination=destination,
+        destination_message_id=message_id,
+        message_title=message_title
     )
 
-    forwarded_username = clean_username(
-        forward.get("username")
-    )
-
-    forwarded_chat_id = forward.get(
-        "chat_id"
-    )
-
-    is_repost = False
-
-    # =====================================================
-    # Exact Message ID
-    # =====================================================
-
-    if (
-        forwarded_message_id
-        and str(forwarded_message_id)
-        == str(source_message_id)
-    ):
-
-        # اگر username منبع مشخص است
-        if source_username:
-
-            if (
-                forwarded_username
-                == source_username
-            ):
-
-                is_repost = True
-
-        # اگر chat_id منبع مشخص است
-        elif source_chat_id:
-
-            if (
-                forwarded_chat_id
-                and str(forwarded_chat_id)
-                == str(source_chat_id)
-            ):
-
-                is_repost = True
-
-        else:
-
-            is_repost = True
-
-    if not is_repost:
-
+    if not saved:
         return
 
-    # =====================================================
-    # Destination
-    # =====================================================
+    # -----------------------------------------------------
+    # ارسال هشدار به مدیران
+    # -----------------------------------------------------
 
-    destination = resolve_destination_channel(
-        chat
-    )
-
-    if not destination:
-
-        destination = {
-            "chat_id": chat_id,
-            "username": username,
-            "title": title
-        }
-
-    destination_chat_id = destination.get(
-        "chat_id"
+    destination_chat_id = (
+        destination.get("chat_id")
+        or destination.get("id")
     )
 
     destination_username = clean_username(
@@ -2162,100 +1336,94 @@ def process_channel_message(message):
 
     destination_title = (
         destination.get("title")
-        or title
         or destination_username
-        or str(destination_chat_id)
+        or "بدون عنوان"
     )
 
-    message_title = get_message_title(
-        message
+    destination_link = build_bale_message_link(
+        username=destination_username,
+        chat_id=destination_chat_id,
+        message_id=message_id
     )
 
-    # =====================================================
-    # Save
-    # =====================================================
-
-    saved = save_repost(
-        source_channel_id=source_chat_id,
-        source_username=source_username,
-        source_message_id=source_message_id,
-        destination_channel_id=destination_chat_id,
-        destination_username=destination_username,
-        destination_message_id=message_id,
-        destination_title=destination_title,
-        message_title=message_title
-    )
-
-    if not saved:
-
-        return
-
-    # =====================================================
-    # Alert
-    # =====================================================
+    source_link = source.get("link")
 
     alert = (
         "🔔 بازنشر جدید شناسایی شد\n\n"
-        f"📢 کانال مقصد: {destination_title}\n"
+        f"📢 کانال مقصد:\n"
+        f"{destination_title}\n"
     )
 
     if destination_username:
-
         alert += (
-            f"🔹 @{destination_username}\n"
+            f"@{destination_username}\n"
         )
 
     alert += (
-        f"📝 عنوان: {message_title}\n"
-        f"🆔 Message ID: {message_id}\n"
-        f"🕐 زمان: "
-        f"{format_jalali_datetime(datetime.now(timezone.utc).isoformat())}\n"
+        "\n"
+        f"📝 عنوان پیام:\n"
+        f"{message_title}\n\n"
+        f"🕐 زمان:\n"
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     )
 
-    if source.get("link"):
-
+    if source_link:
         alert += (
-            "\n🔗 پست مرجع:\n"
-            f"{source.get('link')}\n"
+            f"🔗 پیام مرجع:\n"
+            f"{source_link}\n\n"
         )
 
-    # =====================================================
-    # Send to Owner
-    # =====================================================
+    if destination_link:
+        alert += (
+            f"📎 پیام بازنشرشده:\n"
+            f"{destination_link}"
+        )
 
-    recipients = []
+    notify_admins(
+        alert
+    )
+
+
+# =========================================================
+# NOTIFY ADMINS
+# =========================================================
+
+def get_admin_ids():
+    ids = []
 
     if OWNER_ID:
-
-        recipients.append(
+        ids.append(
             str(OWNER_ID)
         )
 
-    # =====================================================
-    # Send to Admins
-    # =====================================================
-
-    for admin in get_admins():
-
-        admin_id = admin.get(
-            "user_id"
+    try:
+        result = (
+            supabase
+            .table("bot_admins")
+            .select("user_id")
+            .eq("active", True)
+            .execute()
         )
 
-        if (
-            admin_id
-            and str(admin_id)
-            not in recipients
-        ):
+        for row in result.data or []:
+            user_id = row.get("user_id")
 
-            recipients.append(
-                str(admin_id)
-            )
+            if user_id and str(user_id) not in ids:
+                ids.append(
+                    str(user_id)
+                )
 
-    for recipient in recipients:
+    except Exception as e:
+        print("GET ADMIN IDS ERROR:", e)
 
+    return ids
+
+
+def notify_admins(text):
+    for admin_id in get_admin_ids():
         send_message(
-            recipient,
-            alert
+            admin_id,
+            text
         )
 
 
@@ -2264,602 +1432,242 @@ def process_channel_message(message):
 # =========================================================
 
 def report_reposts(chat_id):
+    source = load_selected_source()
 
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    source = get_selected_source()
-
-    source_message_id = source.get(
-        "message_id"
-    )
-
-    if not source_message_id:
-
+    if not source.get("chat_id"):
         send_message(
             chat_id,
-            "❌ هنوز هیچ پست مرجعی انتخاب نشده است.\n\n"
-            "ابتدا پست مرجع را برای ربات Forward کنید."
+            "❌ هنوز هیچ پیام مرجعی انتخاب نشده است.\n\n"
+            "ابتدا پیام موردنظر را از کانال فوروارد کنید."
         )
-
         return
 
-    source_title = (
-        source.get("title")
-        or source.get("username")
-        or "پست مرجع"
-    )
-
-    text = (
-        "📊 گزارش بازنشر\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"📌 پست مرجع: {source_title}\n"
-        f"🆔 Message ID: {source_message_id}\n"
-    )
-
-    if source.get("username"):
-
-        text += (
-            f"🔹 @{clean_username(source.get('username'))}\n"
-        )
-
-    if source.get("link"):
-
-        text += (
-            f"🔗 {source.get('link')}\n"
-        )
-
-    text += (
-        "━━━━━━━━━━━━━━\n\n"
-    )
-
     try:
-
-        query = (
+        result = (
             supabase
             .table("reposts")
             .select("*")
             .eq(
-                "source_message_id",
-                str(source_message_id)
-            )
-        )
-
-        # اگر source chat id مشخص است
-        if source.get("chat_id"):
-
-            query = query.eq(
                 "source_channel_id",
                 str(source.get("chat_id"))
             )
-
-        result = (
-            query
+            .eq(
+                "source_message_id",
+                str(source.get("message_id"))
+            )
             .order(
                 "created_at",
                 desc=True
             )
+            .limit(1000)
             .execute()
         )
 
-        reposts = result.data or []
+        rows = result.data or []
 
-    except Exception as e:
-
-        print(
-            "REPORT ERROR:",
-            e
+        source_title = (
+            source.get("title")
+            or source.get("username")
+            or "پیام مرجع"
         )
 
-        send_message(
-            chat_id,
-            "❌ دریافت گزارش با خطا مواجه شد."
-        )
+        lines = [
+            "📊 گزارش بازنشر",
+            "",
+            f"📌 پیام مرجع:",
+            f"{source_title}",
+            "",
+            f"🆔 Message ID: "
+            f"{source.get('message_id')}",
+            ""
+        ]
 
-        return
+        if source.get("link"):
+            lines.extend([
+                "🔗 لینک پیام مرجع:",
+                source["link"],
+                ""
+            ])
 
-    if not reposts:
-
-        text += (
-            "📭 تاکنون بازنشر ثبت‌شده‌ای "
-            "برای این پست وجود ندارد."
-        )
-
-        send_message(
-            chat_id,
-            text
-        )
-
-        return
-
-    text += (
-        f"🔢 تعداد بازنشر: "
-        f"{len(reposts)}\n\n"
-    )
-
-    for index, repost in enumerate(
-        reposts,
-        start=1
-    ):
-
-        destination_title = (
-            repost.get(
-                "destination_title"
-            )
-            or ""
-        )
-
-        destination_username = clean_username(
-            repost.get(
-                "destination_username"
-            )
-        )
-
-        destination_chat_id = repost.get(
-            "destination_channel_id"
-        )
-
-        # =================================================
-        # Resolve old records
-        # =================================================
-
-        if not destination_title:
-
-            channel = None
-
-            if destination_chat_id:
-
-                channel = get_channel_by_chat_id(
-                    destination_chat_id
-                )
-
-            if (
-                not channel
-                and destination_username
-            ):
-
-                channel = get_channel_by_username(
-                    destination_username
-                )
-
-            if channel:
-
-                destination_title = (
-                    channel.get("title")
-                    or destination_username
-                    or str(destination_chat_id)
-                )
-
-        if not destination_title:
-
-            destination_title = (
-                destination_username
-                or str(destination_chat_id)
-                or "نامشخص"
+        if not rows:
+            lines.append(
+                "❌ این پیام تاکنون در هیچ‌یک "
+                "از کانال‌های ثبت‌شده بازنشر نشده است."
             )
 
-        message_title = (
-            repost.get(
-                "message_title"
-            )
-            or "بدون عنوان"
-        )
-
-        destination_message_id = (
-            repost.get(
-                "destination_message_id"
-            )
-        )
-
-        created_at = format_jalali_datetime(
-            repost.get(
-                "created_at"
-            )
-        )
-
-        text += (
-            f"#{index} "
-            f"📢 {destination_title}\n"
-        )
-
-        if destination_username:
-
-            text += (
-                f"🔹 @{destination_username}\n"
+            send_message(
+                chat_id,
+                "\n".join(lines)
             )
 
-        text += (
-            f"📝 {message_title}\n"
-            f"🆔 {destination_message_id}\n"
-            f"🕐 {created_at}\n"
+            return
+
+        lines.append(
+            f"✅ تعداد بازنشرها: {len(rows)}"
         )
 
-        if (
-            destination_username
-            and destination_message_id
-        ):
+        lines.append("")
 
-            link = normalize_bale_link(
-                destination_username,
-                destination_message_id
-            )
-
-            if link:
-
-                text += (
-                    f"🔗 {link}\n"
-                )
-
-        text += "\n"
-
-    send_message(
-        chat_id,
-        text
-    )
-
-
-# =========================================================
-# LIST CHANNELS
-# =========================================================
-
-def list_channels(chat_id):
-
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    channels = get_active_channels()
-
-    text = (
-        "📡 کانال‌های تحت مانیتور\n\n"
-    )
-
-    if not channels:
-
-        text += (
-            "هیچ کانال فعالی ثبت نشده است."
-        )
-
-    else:
-
-        for index, channel in enumerate(
-            channels,
+        for index, row in enumerate(
+            rows,
             start=1
         ):
+            destination_username = clean_username(
+                row.get(
+                    "destination_username"
+                )
+            )
 
-            title = (
-                channel.get("title")
-                or channel.get("username")
+            destination_chat_id = row.get(
+                "destination_channel_id"
+            )
+
+            destination_message_id = row.get(
+                "destination_message_id"
+            )
+
+            destination_title = (
+                row.get(
+                    "destination_title"
+                )
+                or destination_username
                 or "بدون عنوان"
             )
 
-            username = clean_username(
-                channel.get("username")
+            message_title = (
+                row.get("message_title")
+                or "بدون عنوان"
             )
 
-            text += (
-                f"{index}. 📢 {title}\n"
+            created_at = (
+                row.get("created_at")
+                or "-"
             )
 
-            if username:
+            # -------------------------------------------------
+            # مهم:
+            # لینک برای رکوردهای قدیمی هم همین‌جا
+            # از روی chat_id + message_id ساخته می‌شود.
+            # -------------------------------------------------
 
-                text += (
-                    f"   🔹 @{username}\n"
+            link = build_bale_message_link(
+                username=destination_username,
+                chat_id=destination_chat_id,
+                message_id=destination_message_id
+            )
+
+            lines.append(
+                f"━━━━━━━━━━━━━━\n"
+                f"#{index} 📢 {destination_title}\n"
+            )
+
+            if destination_username:
+                lines.append(
+                    f"@{destination_username}"
                 )
 
-            if channel.get("chat_id"):
+            lines.extend([
+                "",
+                f"📝 {message_title}",
+                f"🕐 {created_at}"
+            ])
 
-                text += (
-                    f"   🆔 {channel.get('chat_id')}\n"
-                )
+            if link:
+                lines.extend([
+                    "",
+                    f"🔗 {link}"
+                ])
+            else:
+                lines.extend([
+                    "",
+                    "⚠️ لینک پیام قابل ساخت نیست "
+                    "(اطلاعات chat_id یا message_id ناقص است)."
+                ])
 
-            text += "\n"
+        # بله ممکن است محدودیت طول پیام داشته باشد.
+        # گزارش را به قسمت‌های کوچک‌تر تقسیم می‌کنیم.
 
-    send_message(
-        chat_id,
-        text
-    )
+        full_text = "\n".join(lines)
 
+        chunks = []
 
-# =========================================================
-# ADD CHANNEL
-# =========================================================
-
-def command_add_channel(
-    chat_id,
-    argument
-):
-
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    username = clean_username(
-        argument
-    )
-
-    if not username:
-
-        send_message(
-            chat_id,
-            "❌ Username کانال را وارد کنید.\n\n"
-            "مثال:\n"
-            "/addchannel @example"
-        )
-
-        return
-
-    channel_chat = get_chat(
-        f"@{username}"
-    )
-
-    title = username
-    channel_id = None
-
-    if channel_chat:
-
-        title = (
-            channel_chat.get("title")
-            or username
-        )
-
-        channel_id = channel_chat.get(
-            "id"
-        )
-
-    success = add_channel(
-        username=username,
-        title=title,
-        chat_id=channel_id
-    )
-
-    if not success:
-
-        send_message(
-            chat_id,
-            "❌ افزودن کانال انجام نشد."
-        )
-
-        return
-
-    text = (
-        "✅ کانال با موفقیت اضافه شد.\n\n"
-        f"📢 {title}\n"
-        f"🔹 @{username}\n"
-    )
-
-    if channel_id:
-
-        text += (
-            f"🆔 {channel_id}\n"
-        )
-
-    send_message(
-        chat_id,
-        text
-    )
-
-
-# =========================================================
-# REMOVE CHANNEL
-# =========================================================
-
-def command_remove_channel(
-    chat_id,
-    argument
-):
-
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    username = clean_username(
-        argument
-    )
-
-    if not username:
-
-        send_message(
-            chat_id,
-            "❌ Username کانال را وارد کنید.\n\n"
-            "مثال:\n"
-            "/removechannel @example"
-        )
-
-        return
-
-    success = remove_channel(
-        username
-    )
-
-    if not success:
-
-        send_message(
-            chat_id,
-            "❌ حذف کانال انجام نشد."
-        )
-
-        return
-
-    send_message(
-        chat_id,
-        f"✅ کانال @{username} از مانیتور خارج شد."
-    )
-
-
-# =========================================================
-# SOURCE COMMAND
-# =========================================================
-
-def command_source(
-    chat_id,
-    argument
-):
-
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
-        return
-
-    username = clean_username(
-        argument
-    )
-
-    if not username:
-
-        send_message(
-            chat_id,
-            "❌ Username کانال مرجع را وارد کنید.\n\n"
-            "مثال:\n"
-            "/source @example"
-        )
-
-        return
-
-    channel = get_channel_by_username(
-        username
-    )
-
-    title = username
-    channel_id = None
-
-    if channel:
-
-        title = (
-            channel.get("title")
-            or username
-        )
-
-        channel_id = channel.get(
-            "chat_id"
-        )
-
-    else:
-
-        channel_chat = get_chat(
-            f"@{username}"
-        )
-
-        if channel_chat:
-
-            title = (
-                channel_chat.get("title")
-                or username
+        while len(full_text) > 3500:
+            cut = full_text.rfind(
+                "\n",
+                0,
+                3500
             )
 
-            channel_id = channel_chat.get(
-                "id"
+            if cut <= 0:
+                cut = 3500
+
+            chunks.append(
+                full_text[:cut]
             )
 
-    save_setting(
-        "source_channel_username",
-        username
-    )
+            full_text = full_text[cut:].lstrip()
 
-    if channel_id:
+        if full_text:
+            chunks.append(
+                full_text
+            )
 
-        save_setting(
-            "source_channel_id",
-            channel_id
+        for chunk in chunks:
+            send_message(
+                chat_id,
+                chunk
+            )
+
+    except Exception as e:
+        print("REPORT ERROR:", e)
+
+        send_message(
+            chat_id,
+            f"❌ خطا در تهیه گزارش:\n{e}"
         )
-
-    send_message(
-        chat_id,
-        "✅ کانال مرجع تعیین شد.\n\n"
-        f"📢 {title}\n"
-        f"🔹 @{username}\n\n"
-        "اکنون پست موردنظر را از همین کانال "
-        "برای ربات Forward کنید."
-    )
 
 
 # =========================================================
 # STATUS
 # =========================================================
 
-def status_command(chat_id):
+def command_status(chat_id):
+    source = load_selected_source()
 
-    if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
+    try:
+        channels = (
+            supabase
+            .table("channels")
+            .select("id")
+            .eq("active", True)
+            .execute()
         )
 
-        return
-
-    channels = get_active_channels()
-
-    source = get_selected_source()
-
-    admins = get_admins()
-
-    text = (
-        "🤖 وضعیت ربات\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"📡 کانال‌های فعال: {len(channels)}\n"
-        f"🛡 Adminها: {len(admins)}\n"
-    )
-
-    if OWNER_ID:
-
-        text += (
-            "👑 Owner: تنظیم شده\n"
+        channel_count = len(
+            channels.data or []
         )
 
-    else:
+    except Exception:
+        channel_count = 0
 
-        text += (
-            "⚠️ Owner: تنظیم نشده\n"
-        )
-
-    text += (
-        "\n━━━━━━━━━━━━━━\n"
-    )
+    source_text = "❌ انتخاب نشده"
 
     if source.get("message_id"):
-
-        text += (
-            "\n📌 پست مرجع فعلی:\n"
-            f"🆔 {source.get('message_id')}\n"
+        source_text = (
+            f"✅ {source.get('title') or '-'}\n"
+            f"Message ID: "
+            f"{source.get('message_id')}"
         )
 
-        if source.get("title"):
-
-            text += (
-                f"📢 {source.get('title')}\n"
-            )
-
-        if source.get("link"):
-
-            text += (
-                f"🔗 {source.get('link')}\n"
-            )
-
-    else:
-
-        text += (
-            "\n📌 پست مرجع: انتخاب نشده"
-        )
+    text = (
+        "📊 وضعیت ربات\n\n"
+        f"📢 تعداد کانال‌های فعال: "
+        f"{channel_count}\n\n"
+        f"📌 پیام مرجع:\n"
+        f"{source_text}\n\n"
+        f"👤 وضعیت شما:\n"
+        f"{'مدیر' if is_admin(chat_id) else 'کاربر عادی'}"
+    )
 
     send_message(
         chat_id,
@@ -2868,72 +1676,49 @@ def status_command(chat_id):
 
 
 # =========================================================
-# START
+# START / MENU
 # =========================================================
 
 def start_message(chat_id):
-
-    # =====================================================
-    # User عادی هیچ منوی مدیریتی نمی‌گیرد
-    # =====================================================
-
     if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
+        send_message(
+            chat_id,
+            "سلام 👋\n\n"
+            "شما دسترسی مدیریتی به این ربات ندارید.\n\n"
+            "برای مشاهده شناسه کاربری خود:\n"
+            "/myid"
         )
-
         return
 
     text = (
-        "🤖 ربات پایش بازنشر\n\n"
-
-        "🎯 دستورات اصلی:\n\n"
-
-        "/source @channel\n"
-        "تعیین کانال مرجع\n\n"
-
-        "/addchannel @channel\n"
-        "افزودن کانال برای مانیتور\n\n"
-
-        "/removechannel @channel\n"
-        "حذف کانال از مانیتور\n\n"
-
-        "/listchannels\n"
-        "نمایش کانال‌های مانیتورشده\n\n"
-
+        "🤖 ربات پایش بازنشر بله\n\n"
+        "📌 ابتدا یک پیام از کانال مرجع را "
+        "به صورت Forward برای ربات ارسال کنید.\n\n"
+        "سپس:\n\n"
         "/report\n"
-        "گزارش بازنشر پست انتخاب‌شده\n\n"
-
+        "گزارش بازنشر همان پیام را نمایش می‌دهد.\n\n"
+        "/channels\n"
+        "فهرست کانال‌ها\n\n"
+        "/addchannel @channel\n"
+        "افزودن کانال\n\n"
+        "/removechannel @channel\n"
+        "حذف کانال\n\n"
         "/status\n"
-        "نمایش وضعیت ربات\n\n"
-
+        "وضعیت ربات\n\n"
         "/myid\n"
-        "نمایش User ID\n"
+        "شناسه کاربری"
     )
 
-    # =====================================================
-    # Owner
-    # =====================================================
-
     if is_owner(chat_id):
-
         text += (
-            "\n━━━━━━━━━━━━━━\n\n"
-
-            "👑 مدیریت Adminها:\n\n"
-
-            "/addadmin 123456789\n"
-            "افزودن Admin با User ID\n\n"
-
-            "/addadmin @username\n"
-            "افزودن Admin با Username\n\n"
-
-            "/removeadmin 123456789\n"
-            "حذف Admin\n\n"
-
-            "/listadmins\n"
-            "نمایش Adminها\n"
+            "\n\n"
+            "👑 مدیریت مدیران:\n\n"
+            "/addadmin USER_ID\n"
+            "افزودن مدیر\n\n"
+            "/removeadmin USER_ID\n"
+            "حذف مدیر\n\n"
+            "/admins\n"
+            "فهرست مدیران"
         )
 
     send_message(
@@ -2951,7 +1736,6 @@ def process_command(
     text,
     username=None
 ):
-
     if not text:
         return
 
@@ -2965,180 +1749,115 @@ def process_command(
     command = parts[0].lower()
 
     if "@" in command:
-
         command = command.split(
             "@",
             1
         )[0]
 
-    argument = ""
+    args = parts[1:]
 
-    if len(parts) > 1:
-
-        argument = " ".join(
-            parts[1:]
-        ).strip()
-
-    # =====================================================
-    # /myid
-    #
-    # این دستور برای همه آزاد است
-    # =====================================================
+    # -----------------------------------------------------
+    # /myid باید قبل از بررسی admin باشد
+    # -----------------------------------------------------
 
     if command == "/myid":
-
         show_my_id(
             chat_id
         )
-
         return
 
-    # =====================================================
-    # امنیت
-    # =====================================================
+    # -----------------------------------------------------
+    # تمام دستورات دیگر فقط برای مدیر
+    # -----------------------------------------------------
 
     if not is_admin(chat_id):
-
-        deny_access(
-            chat_id
-        )
-
+        deny_access(chat_id)
         return
 
-    # =====================================================
-    # START
-    # =====================================================
-
-    if command == "/start":
-
+    if command in (
+        "/start",
+        "/help"
+    ):
         start_message(
             chat_id
         )
-
         return
-
-    # =====================================================
-    # SOURCE
-    # =====================================================
-
-    if command == "/source":
-
-        command_source(
-            chat_id,
-            argument
-        )
-
-        return
-
-    # =====================================================
-    # ADD CHANNEL
-    # =====================================================
-
-    if command == "/addchannel":
-
-        command_add_channel(
-            chat_id,
-            argument
-        )
-
-        return
-
-    # =====================================================
-    # REMOVE CHANNEL
-    # =====================================================
-
-    if command == "/removechannel":
-
-        command_remove_channel(
-            chat_id,
-            argument
-        )
-
-        return
-
-    # =====================================================
-    # LIST CHANNELS
-    # =====================================================
-
-    if command == "/listchannels":
-
-        list_channels(
-            chat_id
-        )
-
-        return
-
-    # =====================================================
-    # REPORT
-    # =====================================================
 
     if command == "/report":
-
         report_reposts(
             chat_id
         )
-
         return
 
-    # =====================================================
-    # STATUS
-    # =====================================================
-
-    if command == "/status":
-
-        status_command(
+    if command == "/channels":
+        list_channels(
             chat_id
         )
-
         return
 
-    # =====================================================
-    # ADD ADMIN
-    # =====================================================
+    if command == "/addchannel":
+        if not args:
+            send_message(
+                chat_id,
+                "فرمت صحیح:\n"
+                "/addchannel @channel"
+            )
+            return
+
+        add_channel(
+            chat_id,
+            args[0]
+        )
+        return
+
+    if command == "/removechannel":
+        if not args:
+            send_message(
+                chat_id,
+                "فرمت صحیح:\n"
+                "/removechannel @channel"
+            )
+            return
+
+        remove_channel(
+            chat_id,
+            args[0]
+        )
+        return
+
+    if command == "/status":
+        command_status(
+            chat_id
+        )
+        return
 
     if command == "/addadmin":
-
         command_add_admin(
             chat_id,
-            argument
+            args
         )
-
         return
-
-    # =====================================================
-    # REMOVE ADMIN
-    # =====================================================
 
     if command == "/removeadmin":
-
         command_remove_admin(
             chat_id,
-            argument
+            args
         )
-
         return
 
-    # =====================================================
-    # LIST ADMINS
-    # =====================================================
-
-    if command == "/listadmins":
-
+    if command in (
+        "/admins",
+        "/listadmins"
+    ):
         command_list_admins(
             chat_id
         )
-
         return
-
-    # =====================================================
-    # UNKNOWN
-    # =====================================================
 
     send_message(
         chat_id,
         "❓ دستور ناشناخته است.\n\n"
-        "برای مشاهده دستورات:\n"
-        "/start"
+        "برای مشاهده راهنما /start را ارسال کنید."
     )
 
 
@@ -3147,7 +1866,6 @@ def process_command(
 # =========================================================
 
 def process_update(update):
-
     if not update:
         return
 
@@ -3158,10 +1876,9 @@ def process_update(update):
     if not message:
         return
 
-    chat = (
-        message.get("chat")
-        or {}
-    )
+    chat = message.get(
+        "chat"
+    ) or {}
 
     chat_id = chat.get(
         "id"
@@ -3170,11 +1887,7 @@ def process_update(update):
     if chat_id is None:
         return
 
-    # =====================================================
-    # مهم:
-    # هر کاربری که با ربات تعامل می‌کند ثبت می‌شود
-    # =====================================================
-
+    # ذخیره تمام کاربرانی که با ربات تعامل دارند
     save_bot_user(
         chat
     )
@@ -3189,80 +1902,52 @@ def process_update(update):
 
     if chat_type == "private":
 
-        text = (
-            message.get("text")
-            or ""
-        )
-
-        # =================================================
-        # /myid برای همه کاربران
-        #
-        # این قسمت باید قبل از is_admin باشد
-        # =================================================
+        text = message.get(
+            "text"
+        ) or ""
 
         first_command = ""
 
         if text.strip():
-
             first_command = (
-                text
-                .strip()
+                text.strip()
                 .split()[0]
                 .lower()
             )
 
             if "@" in first_command:
-
                 first_command = (
                     first_command
                     .split("@", 1)[0]
                 )
 
+        # /myid برای همه آزاد است
         if first_command == "/myid":
-
             show_my_id(
                 chat_id
             )
-
             return
 
-        # =================================================
-        # بعد از /myid:
-        # فقط Admin / Owner
-        # =================================================
-
-        if not is_admin(chat_id):
-
-            deny_access(
-                chat_id
-            )
-
-            return
-
-        # =================================================
-        # Forward
-        # =================================================
-
+        # بررسی Forward
         forward = extract_forward(
             message
         )
 
-        if forward.get(
-            "message_id"
-        ):
+        if forward.get("message_id"):
+
+            if not is_admin(chat_id):
+                deny_access(
+                    chat_id
+                )
+                return
 
             process_private_forward(
                 message
             )
-
             return
 
-        # =================================================
-        # Commands
-        # =================================================
-
+        # سایر دستورات
         if text:
-
             process_command(
                 chat_id,
                 text,
@@ -3276,105 +1961,101 @@ def process_update(update):
     # =====================================================
 
     if chat_type == "channel":
-
         process_channel_message(
             message
         )
-
         return
 
 
 # =========================================================
-# POLLING
+# GET UPDATES
 # =========================================================
 
-def run_polling():
+def get_updates(offset=None):
+    data = {
+        "timeout": 30,
+        "allowed_updates": [
+            "message"
+        ]
+    }
 
-    print(
-        "=========================================="
+    if offset is not None:
+        data["offset"] = offset
+
+    return bale_request(
+        "getUpdates",
+        data
     )
 
-    print(
-        "BALE REPOST MONITOR STARTED"
-    )
 
-    print(
-        "OWNER_ID:",
-        OWNER_ID
-    )
+# =========================================================
+# MAIN LOOP
+# =========================================================
 
-    print(
-        "=========================================="
-    )
+def main():
+    global OFFSET
 
-    offset = None
+    load_owner()
+    load_selected_source()
+
+    print("=" * 60)
+    print("BALE REPOST MONITOR STARTED")
+    print("OWNER_ID:", OWNER_ID)
+    print("SELECTED_SOURCE:", SELECTED_SOURCE)
+    print("=" * 60)
 
     while True:
 
         try:
-
-            payload = {
-                "timeout": 50
-            }
-
-            if offset is not None:
-
-                payload["offset"] = offset
-
-            result = bale(
-                "getUpdates",
-                payload,
-                timeout=60
+            result = get_updates(
+                OFFSET
             )
 
-            if not result:
+            if not result.get("ok"):
+                print(
+                    "GET UPDATES FAILED:",
+                    result
+                )
 
-                time.sleep(2)
-
+                time.sleep(3)
                 continue
 
-            updates = result.get(
-                "result",
-                []
+            updates = (
+                result.get("result")
+                or []
             )
 
             for update in updates:
 
-                try:
+                update_id = update.get(
+                    "update_id"
+                )
 
-                    update_id = update.get(
-                        "update_id"
+                if update_id is not None:
+                    OFFSET = (
+                        int(update_id) + 1
                     )
 
-                    if update_id is not None:
-
-                        offset = (
-                            update_id + 1
-                        )
-
+                try:
                     process_update(
                         update
                     )
 
                 except Exception as e:
-
                     print(
                         "PROCESS UPDATE ERROR:",
                         e
                     )
 
         except KeyboardInterrupt:
-
             print(
                 "BOT STOPPED"
             )
-
             break
 
         except Exception as e:
-
             print(
-                "POLLING ERROR:",
+                "MAIN LOOP ERROR:",
                 e
             )
 
@@ -3382,9 +2063,8 @@ def run_polling():
 
 
 # =========================================================
-# START BOT
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
-
-    run_polling()
+    main()
