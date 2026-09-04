@@ -104,11 +104,6 @@ def html_attr(value):
 # =========================================================
 
 def markdown_text(value):
-    """
-    برای Markdown معمولی.
-    کاراکترهای خاص Markdown را تا حد ممکن escape می‌کند.
-    """
-
     if value is None:
         return ""
 
@@ -132,10 +127,6 @@ def markdown_text(value):
 
 
 def markdown_link(label, url, emoji=""):
-    """
-    ساخت لینک قابل کلیک با Markdown.
-    """
-
     if not url:
         return ""
 
@@ -144,24 +135,7 @@ def markdown_link(label, url, emoji=""):
     if not url:
         return ""
 
-    # URL را دستکاری نمی‌کنیم تا لینک خراب نشود.
     return f"{emoji} [{markdown_text(label)}]({url})"
-
-
-def raw_or_markdown_link(label, url, emoji=""):
-    """
-    اگر لینک موجود باشد Markdown Link برمی‌گرداند.
-    در غیر این صورت رشته خالی.
-    """
-
-    if not url:
-        return ""
-
-    return markdown_link(
-        label,
-        url,
-        emoji
-    )
 
 
 # =========================================================
@@ -243,7 +217,9 @@ def format_iran_datetime(value):
 
         if isinstance(value, datetime):
             dt = value
+
         else:
+
             value = str(value).strip()
 
             if value.endswith("Z"):
@@ -313,7 +289,7 @@ def bale_request(
 
             print(
                 "BALE RAW:",
-                response.text[:2000]
+                response.text[:3000]
             )
 
             return None
@@ -354,10 +330,10 @@ def get_me():
 
     if BOT_INFO:
 
-        print("=" * 40)
+        print("=" * 50)
         print("BOT INFORMATION")
         print(BOT_INFO)
-        print("=" * 40)
+        print("=" * 50)
 
     return BOT_INFO
 
@@ -458,7 +434,7 @@ def get_updates(offset=None):
 
 
 # =========================================================
-# INLINE KEYBOARDS
+# KEYBOARDS
 # =========================================================
 
 def source_report_keyboard():
@@ -522,6 +498,10 @@ def build_bale_message_link(
     if not chat_id or not message_id:
         return None
 
+    # فرمت لینک بله که در پروژه استفاده می‌کنیم:
+    #
+    # https://ble.ir/USERNAME/CHAT_ID/MESSAGE_ID
+
     return (
         f"https://ble.ir/"
         f"{username}/"
@@ -541,10 +521,6 @@ def resolve_message_link(
 
     username = clean_username(username)
 
-    # -----------------------------------------------------
-    # اگر username داریم
-    # -----------------------------------------------------
-
     if username:
 
         return build_bale_message_link(
@@ -552,10 +528,6 @@ def resolve_message_link(
             chat_id,
             message_id
         )
-
-    # -----------------------------------------------------
-    # اگر username نداریم، از getChat بگیر
-    # -----------------------------------------------------
 
     try:
 
@@ -586,7 +558,7 @@ def resolve_message_link(
 
 
 # =========================================================
-# DATABASE SETTINGS
+# SETTINGS
 # =========================================================
 
 def get_setting(key):
@@ -943,6 +915,7 @@ def auto_register_chat(chat):
 
             bot_member = row.get("bot_member")
 
+            # NULL را عضو در نظر می‌گیریم
             if bot_member is None:
                 bot_member = True
 
@@ -953,18 +926,25 @@ def auto_register_chat(chat):
             }
 
             if manually_disabled:
+
                 data["active"] = False
 
             elif bot_member is False:
+
                 data["active"] = False
 
             else:
+
                 data["active"] = True
 
             return update_channel_row(
                 row["id"],
                 data
             )
+
+        # -----------------------------------------------
+        # اگر chat_id قبلاً نبود، username را هم بررسی کن
+        # -----------------------------------------------
 
         if username:
 
@@ -988,18 +968,25 @@ def auto_register_chat(chat):
                 }
 
                 if manually_disabled:
+
                     data["active"] = False
 
                 elif bot_member is False:
+
                     data["active"] = False
 
                 else:
+
                     data["active"] = True
 
                 return update_channel_row(
                     row["id"],
                     data
                 )
+
+        # -----------------------------------------------
+        # مقصد جدید
+        # -----------------------------------------------
 
         (
             supabase
@@ -1456,18 +1443,39 @@ def get_active_channels():
 
     try:
 
+        # -------------------------------------------------
+        # عمداً فقط active=True را می‌گیریم.
+        #
+        # bot_member و manually_disabled ممکن است در
+        # رکوردهای قدیمی NULL باشند.
+        # -------------------------------------------------
+
         result = (
             supabase
             .table("channels")
             .select("*")
             .eq("active", True)
-            .eq("bot_member", True)
-            .eq("manually_disabled", False)
             .order("title")
             .execute()
         )
 
-        return result.data or []
+        rows = result.data or []
+
+        valid = []
+
+        for row in rows:
+
+            # اگر دستی غیرفعال شده، فعال حساب نشود
+            if row.get("manually_disabled") is True:
+                continue
+
+            # اگر مشخصاً ربات خارج شده، فعال حساب نشود
+            if row.get("bot_member") is False:
+                continue
+
+            valid.append(row)
+
+        return valid
 
     except Exception as e:
 
@@ -1512,28 +1520,80 @@ def extract_forward(message):
     if not message:
         return None
 
-    forward_chat = (
-        message.get("forward_from_chat")
-        or message.get("sender_chat")
+    print(
+        "🔎 CHECK FORWARD MESSAGE:"
     )
 
-    if not forward_chat:
+    print(
+        "MESSAGE KEYS:",
+        list(message.keys())
+    )
 
-        forward_origin = message.get(
-            "forward_origin"
+    # -----------------------------------------------------
+    # ساختارهای مختلف احتمالی Bale
+    # -----------------------------------------------------
+
+    forward_origin = message.get(
+        "forward_origin"
+    )
+
+    forward_chat = None
+
+    # حالت قدیمی/مستقیم
+    possible_forward_chat = (
+        message.get("forward_from_chat")
+        or message.get("forward_chat")
+    )
+
+    if isinstance(
+        possible_forward_chat,
+        dict
+    ):
+        forward_chat = possible_forward_chat
+
+    # حالت forward_origin
+    if not forward_chat and isinstance(
+        forward_origin,
+        dict
+    ):
+
+        forward_chat = (
+            forward_origin.get("chat")
+            or forward_origin.get("sender_chat")
         )
 
-        if isinstance(forward_origin, dict):
+    # بعضی ساختارها ممکن است sender_chat داشته باشند
+    if not forward_chat:
 
-            forward_chat = (
-                forward_origin.get("chat")
-                or forward_origin.get("sender_chat")
+        sender_chat = message.get(
+            "sender_chat"
+        )
+
+        # sender_chat فقط وقتی قابل استفاده است
+        # که پیام واقعاً Forward شده باشد.
+        if (
+            isinstance(sender_chat, dict)
+            and (
+                forward_origin
+                or message.get("forward_from_message_id")
+                or message.get("forwarded_message_id")
+                or message.get("forward_message_id")
             )
+        ):
+
+            forward_chat = sender_chat
 
     if not forward_chat:
+
+        print(
+            "❌ FORWARD CHAT NOT FOUND"
+        )
+
         return None
 
-    source_chat_id = forward_chat.get("id")
+    source_chat_id = (
+        forward_chat.get("id")
+    )
 
     source_username = clean_username(
         forward_chat.get("username")
@@ -1541,9 +1601,14 @@ def extract_forward(message):
 
     source_title = (
         forward_chat.get("title")
+        or forward_chat.get("first_name")
         or source_username
         or source_chat_id
     )
+
+    # -----------------------------------------------------
+    # Message ID مبدأ
+    # -----------------------------------------------------
 
     source_message_id = (
         message.get("forward_from_message_id")
@@ -1553,11 +1618,10 @@ def extract_forward(message):
 
     if not source_message_id:
 
-        forward_origin = message.get(
-            "forward_origin"
-        )
-
-        if isinstance(forward_origin, dict):
+        if isinstance(
+            forward_origin,
+            dict
+        ):
 
             source_message_id = (
                 forward_origin.get("message_id")
@@ -1566,7 +1630,41 @@ def extract_forward(message):
                 )
             )
 
+    # بعض نسخه‌ها ممکن است origin را nested کنند
     if not source_message_id:
+
+        origin_message = (
+            forward_origin.get("message")
+            if isinstance(
+                forward_origin,
+                dict
+            )
+            else None
+        )
+
+        if isinstance(
+            origin_message,
+            dict
+        ):
+
+            source_message_id = (
+                origin_message.get("message_id")
+            )
+
+    if source_chat_id is None:
+
+        print(
+            "❌ SOURCE CHAT ID NOT FOUND"
+        )
+
+        return None
+
+    if source_message_id is None:
+
+        print(
+            "❌ SOURCE MESSAGE ID NOT FOUND"
+        )
+
         return None
 
     source_link = (
@@ -1584,17 +1682,44 @@ def extract_forward(message):
             source_message_id
         )
 
-    return {
-        "channel_id": (
-            str(source_chat_id)
-            if source_chat_id is not None
-            else None
-        ),
+    source = {
+        "channel_id": str(source_chat_id),
         "message_id": str(source_message_id),
         "username": source_username,
         "title": source_title,
         "message_link": source_link
     }
+
+    print(
+        "✅ FORWARD DETECTED:"
+    )
+
+    print(
+        "SOURCE CHAT:",
+        source["channel_id"]
+    )
+
+    print(
+        "SOURCE MESSAGE:",
+        source["message_id"]
+    )
+
+    print(
+        "SOURCE USERNAME:",
+        source["username"]
+    )
+
+    print(
+        "SOURCE TITLE:",
+        source["title"]
+    )
+
+    print(
+        "SOURCE LINK:",
+        source["message_link"]
+    )
+
+    return source
 
 
 # =========================================================
@@ -1646,11 +1771,6 @@ def set_selected_source(
         source_report_keyboard()
     )
 
-    # -----------------------------------------------------
-    # لینک را جداگانه با Markdown می‌فرستیم
-    # تا با HTML پیام بالا تداخل نداشته باشد.
-    # -----------------------------------------------------
-
     if source.get("message_link"):
 
         link_text = markdown_link(
@@ -1684,6 +1804,102 @@ def get_selected_source():
             "selected_source_message_link"
         )
     }
+
+
+# =========================================================
+# FORWARD MATCHING
+# =========================================================
+
+def message_matches_source(
+    message,
+    source
+):
+
+    if not message:
+        return False
+
+    if not source:
+        return False
+
+    source_channel_id = source.get(
+        "channel_id"
+    )
+
+    source_message_id = source.get(
+        "message_id"
+    )
+
+    if not source_channel_id:
+        return False
+
+    if not source_message_id:
+        return False
+
+    forwarded = extract_forward(
+        message
+    )
+
+    if not forwarded:
+
+        print(
+            "⏭ DESTINATION MESSAGE IS NOT A FORWARD"
+        )
+
+        return False
+
+    destination_source_chat_id = (
+        forwarded.get("channel_id")
+    )
+
+    destination_source_message_id = (
+        forwarded.get("message_id")
+    )
+
+    matched = (
+        str(destination_source_chat_id)
+        == str(source_channel_id)
+        and
+        str(destination_source_message_id)
+        == str(source_message_id)
+    )
+
+    if matched:
+
+        print(
+            "✅ SOURCE MATCHED!"
+        )
+
+        print(
+            "SOURCE:",
+            source_channel_id,
+            source_message_id
+        )
+
+        print(
+            "FORWARD:",
+            destination_source_chat_id,
+            destination_source_message_id
+        )
+
+        return True
+
+    print(
+        "❌ SOURCE NOT MATCHED"
+    )
+
+    print(
+        "SELECTED SOURCE:",
+        source_channel_id,
+        source_message_id
+    )
+
+    print(
+        "FORWARDED SOURCE:",
+        destination_source_chat_id,
+        destination_source_message_id
+    )
+
+    return False
 
 
 # =========================================================
@@ -1778,16 +1994,27 @@ def save_repost(
             "created_at": now_iso()
         }
 
+        if destination_link:
+
+            data[
+                "destination_message_link"
+            ] = destination_link
+
         # -------------------------------------------------
-        # اگر ستون destination_message_link در دیتابیس
-        # وجود داشته باشد، لینک مقصد را نیز ذخیره می‌کنیم.
-        #
-        # اگر ستون وجود نداشته باشد، INSERT خطا می‌دهد.
-        # بنابراین ابتدا تلاش می‌کنیم با ستون لینک ذخیره کنیم.
+        # جلوگیری از duplicate قبل از INSERT
         # -------------------------------------------------
 
-        if destination_link:
-            data["destination_message_link"] = destination_link
+        if repost_exists(
+            source.get("channel_id"),
+            source.get("message_id"),
+            destination.get("id")
+        ):
+
+            print(
+                "⚠️ REPOST ALREADY EXISTS"
+            )
+
+            return False
 
         try:
 
@@ -1802,16 +2029,12 @@ def save_repost(
 
         except Exception as first_error:
 
-            # ---------------------------------------------
-            # سازگاری با دیتابیس قدیمی که ستون
-            # destination_message_link ندارد.
-            # ---------------------------------------------
-
             print(
                 "SAVE REPOST WITH LINK ERROR:",
                 repr(first_error)
             )
 
+            # سازگاری با DB قدیمی
             data.pop(
                 "destination_message_link",
                 None
@@ -1929,6 +2152,27 @@ def notify_admins(text):
             )
 
 
+def notify_admins_markdown(text):
+
+    for admin_id in get_admin_ids():
+
+        try:
+
+            send_markdown_message(
+                admin_id,
+                text
+            )
+
+            time.sleep(0.1)
+
+        except Exception as e:
+
+            print(
+                "NOTIFY MARKDOWN ERROR:",
+                repr(e)
+            )
+
+
 # =========================================================
 # REPOST ALERT
 # =========================================================
@@ -1946,9 +2190,9 @@ def send_repost_alert(
 
     destination_chat_id = destination.get("id")
 
-    # =====================================================
+    # -----------------------------------------------------
     # لینک مقصد
-    # =====================================================
+    # -----------------------------------------------------
 
     destination_link = resolve_message_link(
         destination_username,
@@ -1956,9 +2200,9 @@ def send_repost_alert(
         destination_message_id
     )
 
-    # =====================================================
+    # -----------------------------------------------------
     # لینک مبدأ
-    # =====================================================
+    # -----------------------------------------------------
 
     source_link = source.get(
         "message_link"
@@ -1972,11 +2216,9 @@ def send_repost_alert(
             source.get("message_id")
         )
 
-    title = get_message_title(message)
-
-    # -----------------------------------------------------
-    # پیام اصلی گزارش با HTML
-    # -----------------------------------------------------
+    title = get_message_title(
+        message
+    )
 
     text = (
         "🔔 <b>بازنشر جدید شناسایی شد</b>\n\n"
@@ -1998,10 +2240,6 @@ def send_repost_alert(
         f"{format_iran_datetime(now_iso())}"
     )
 
-    # -----------------------------------------------------
-    # پیام اصلی
-    # -----------------------------------------------------
-
     notify_admins(text)
 
     # -----------------------------------------------------
@@ -2010,14 +2248,12 @@ def send_repost_alert(
 
     if source_link:
 
-        source_link_text = markdown_link(
-            "مشاهده پست مبدأ",
-            source_link,
-            "🔵"
-        )
-
         notify_admins_markdown(
-            source_link_text
+            markdown_link(
+                "مشاهده پست مبدأ",
+                source_link,
+                "🔵"
+            )
         )
 
     # -----------------------------------------------------
@@ -2026,14 +2262,12 @@ def send_repost_alert(
 
     if destination_link:
 
-        destination_link_text = markdown_link(
-            "مشاهده پست مقصد",
-            destination_link,
-            "🟢"
-        )
-
         notify_admins_markdown(
-            destination_link_text
+            markdown_link(
+                "مشاهده پست مقصد",
+                destination_link,
+                "🟢"
+            )
         )
 
     else:
@@ -2041,27 +2275,6 @@ def send_repost_alert(
         notify_admins(
             "🟢 ⚠️ لینک مستقیم پست مقصد در دسترس نیست."
         )
-
-
-def notify_admins_markdown(text):
-
-    for admin_id in get_admin_ids():
-
-        try:
-
-            send_markdown_message(
-                admin_id,
-                text
-            )
-
-            time.sleep(0.1)
-
-        except Exception as e:
-
-            print(
-                "NOTIFY MARKDOWN ERROR:",
-                repr(e)
-            )
 
 
 # =========================================================
@@ -2092,24 +2305,75 @@ def process_channel_message(message):
     if chat_id is None:
         return
 
+    print(
+        "\n"
+        "📡 DESTINATION MESSAGE RECEIVED"
+    )
+
+    print(
+        "DESTINATION CHAT:",
+        chat_id
+    )
+
+    print(
+        "DESTINATION TYPE:",
+        chat_type
+    )
+
+    print(
+        "DESTINATION MESSAGE:",
+        message.get("message_id")
+    )
+
     # -----------------------------------------------------
-    # ثبت مقصد
+    # مقصد باید قبلاً شناخته شده باشد
+    #
+    # اینجا auto_register را حذف کردیم تا یک پیام عادی
+    # نتواند مقصدی را که قبلاً حذف شده دوباره فعال کند.
     # -----------------------------------------------------
 
-    auto_register_chat(chat)
-
-    row = get_channel_by_chat_id(chat_id)
+    row = get_channel_by_chat_id(
+        chat_id
+    )
 
     if not row:
+
+        print(
+            "⏭ DESTINATION NOT REGISTERED:",
+            chat_id
+        )
+
         return
 
+    # -----------------------------------------------------
+    # وضعیت مقصد
+    # -----------------------------------------------------
+
     if row.get("active") is not True:
+
+        print(
+            "⏭ DESTINATION NOT ACTIVE:",
+            chat_id
+        )
+
         return
 
     if row.get("bot_member") is False:
+
+        print(
+            "⏭ BOT IS NOT MEMBER:",
+            chat_id
+        )
+
         return
 
     if row.get("manually_disabled") is True:
+
+        print(
+            "⏭ DESTINATION MANUALLY DISABLED:",
+            chat_id
+        )
+
         return
 
     # -----------------------------------------------------
@@ -2119,9 +2383,42 @@ def process_channel_message(message):
     source = get_selected_source()
 
     if not source.get("channel_id"):
+
+        print(
+            "⏭ NO SELECTED SOURCE CHANNEL"
+        )
+
         return
 
     if not source.get("message_id"):
+
+        print(
+            "⏭ NO SELECTED SOURCE MESSAGE"
+        )
+
+        return
+
+    print(
+        "SELECTED SOURCE:",
+        source.get("channel_id"),
+        source.get("message_id")
+    )
+
+    # -----------------------------------------------------
+    # بسیار مهم:
+    # فقط Forward واقعی همان پست مبدأ قبول می‌شود.
+    # -----------------------------------------------------
+
+    if not message_matches_source(
+        message,
+        source
+    ):
+
+        print(
+            "⏭ MESSAGE IGNORED:"
+            " NOT THE SELECTED SOURCE"
+        )
+
         return
 
     destination_message_id = message.get(
@@ -2129,10 +2426,15 @@ def process_channel_message(message):
     )
 
     if destination_message_id is None:
+
+        print(
+            "❌ DESTINATION MESSAGE ID MISSING"
+        )
+
         return
 
     # -----------------------------------------------------
-    # جلوگیری از ثبت دوباره
+    # duplicate
     # -----------------------------------------------------
 
     if repost_exists(
@@ -2140,6 +2442,17 @@ def process_channel_message(message):
         source.get("message_id"),
         str(chat_id)
     ):
+
+        print(
+            "⏭ DUPLICATE REPOST:"
+        )
+
+        print(
+            source.get("channel_id"),
+            source.get("message_id"),
+            chat_id
+        )
+
         return
 
     destination = {
@@ -2152,7 +2465,9 @@ def process_channel_message(message):
         )
     }
 
-    title = get_message_title(message)
+    title = get_message_title(
+        message
+    )
 
     saved = save_repost(
         source,
@@ -2162,10 +2477,15 @@ def process_channel_message(message):
     )
 
     if not saved:
+
+        print(
+            "❌ REPOST WAS NOT SAVED"
+        )
+
         return
 
-    print("=" * 40)
-    print("REPOST SAVED")
+    print("=" * 60)
+    print("✅ REPOST SAVED")
     print(
         "SOURCE:",
         source.get("channel_id"),
@@ -2176,7 +2496,7 @@ def process_channel_message(message):
         chat_id,
         destination_message_id
     )
-    print("=" * 40)
+    print("=" * 60)
 
     send_repost_alert(
         source,
@@ -2197,7 +2517,9 @@ def handle_bot_membership_update(update):
     if not bot:
         return False
 
-    bot_id = str(bot.get("id"))
+    bot_id = str(
+        bot.get("id")
+    )
 
     # -----------------------------------------------------
     # my_chat_member
@@ -2209,13 +2531,22 @@ def handle_bot_membership_update(update):
 
     if my_chat_member:
 
-        print("🔥 FOUND my_chat_member")
-        print(my_chat_member)
+        print(
+            "🔥 FOUND my_chat_member"
+        )
 
-        chat = my_chat_member.get("chat")
+        print(
+            my_chat_member
+        )
+
+        chat = my_chat_member.get(
+            "chat"
+        )
 
         new_member = (
-            my_chat_member.get("new_chat_member")
+            my_chat_member.get(
+                "new_chat_member"
+            )
             or {}
         )
 
@@ -2226,7 +2557,8 @@ def handle_bot_membership_update(update):
 
         if (
             chat
-            and str(user.get("id")) == bot_id
+            and str(user.get("id"))
+            == bot_id
         ):
 
             status = str(
@@ -2272,13 +2604,22 @@ def handle_bot_membership_update(update):
 
     if chat_member:
 
-        print("🔥 FOUND chat_member")
-        print(chat_member)
+        print(
+            "🔥 FOUND chat_member"
+        )
 
-        chat = chat_member.get("chat")
+        print(
+            chat_member
+        )
+
+        chat = chat_member.get(
+            "chat"
+        )
 
         new_member = (
-            chat_member.get("new_chat_member")
+            chat_member.get(
+                "new_chat_member"
+            )
             or {}
         )
 
@@ -2289,7 +2630,8 @@ def handle_bot_membership_update(update):
 
         if (
             chat
-            and str(user.get("id")) == bot_id
+            and str(user.get("id"))
+            == bot_id
         ):
 
             status = str(
@@ -2355,7 +2697,9 @@ def handle_group_service_message(message):
     if not bot:
         return False
 
-    bot_id = str(bot.get("id"))
+    bot_id = str(
+        bot.get("id")
+    )
 
     # -----------------------------------------------------
     # BOT ADDED
@@ -2366,19 +2710,33 @@ def handle_group_service_message(message):
         or []
     )
 
-    if isinstance(new_members, dict):
-        new_members = [new_members]
+    if isinstance(
+        new_members,
+        dict
+    ):
+
+        new_members = [
+            new_members
+        ]
 
     for member in new_members:
 
-        if not isinstance(member, dict):
+        if not isinstance(
+            member,
+            dict
+        ):
             continue
 
         member_id = member.get("id")
 
-        user_obj = member.get("user")
+        user_obj = member.get(
+            "user"
+        )
 
-        if isinstance(user_obj, dict):
+        if isinstance(
+            user_obj,
+            dict
+        ):
 
             member_id = (
                 user_obj.get("id")
@@ -2387,10 +2745,10 @@ def handle_group_service_message(message):
 
         if str(member_id) == bot_id:
 
-            print("=" * 40)
+            print("=" * 50)
             print("🔥 BOT ADDED TO GROUP")
             print("CHAT:", chat)
-            print("=" * 40)
+            print("=" * 50)
 
             activate_chat(
                 chat,
@@ -2411,13 +2769,23 @@ def handle_group_service_message(message):
 
         member_id = None
 
-        if isinstance(left_member, dict):
+        if isinstance(
+            left_member,
+            dict
+        ):
 
-            member_id = left_member.get("id")
+            member_id = left_member.get(
+                "id"
+            )
 
-            user_obj = left_member.get("user")
+            user_obj = left_member.get(
+                "user"
+            )
 
-            if isinstance(user_obj, dict):
+            if isinstance(
+                user_obj,
+                dict
+            ):
 
                 member_id = (
                     user_obj.get("id")
@@ -2426,10 +2794,10 @@ def handle_group_service_message(message):
 
         if str(member_id) == bot_id:
 
-            print("=" * 40)
+            print("=" * 50)
             print("🔴 BOT REMOVED FROM GROUP")
             print("CHAT:", chat)
-            print("=" * 40)
+            print("=" * 50)
 
             deactivate_chat(
                 chat.get("id")
@@ -2441,29 +2809,18 @@ def handle_group_service_message(message):
 
 
 # =========================================================
-# REPORT FOR SELECTED SOURCE
+# REPORT DATA
 # =========================================================
 
-def generate_report():
+def get_reposts_for_selected_source():
 
     source = get_selected_source()
 
     if not source.get("channel_id"):
+        return source, []
 
-        return (
-            "📊 <b>گزارش بازنشر</b>\n\n"
-            "⚠️ هنوز پست مبدأ انتخاب نشده است.\n\n"
-            "یک پست را از کانال مبدأ برای ربات "
-            "Forward کنید."
-        )
-
-    source_channel_id = str(
-        source.get("channel_id")
-    )
-
-    source_message_id = str(
-        source.get("message_id")
-    )
+    if not source.get("message_id"):
+        return source, []
 
     try:
 
@@ -2473,11 +2830,11 @@ def generate_report():
             .select("*")
             .eq(
                 "source_channel_id",
-                source_channel_id
+                str(source.get("channel_id"))
             )
             .eq(
                 "source_message_id",
-                source_message_id
+                str(source.get("message_id"))
             )
             .order(
                 "created_at",
@@ -2491,11 +2848,11 @@ def generate_report():
     except Exception as e:
 
         print(
-            "REPORT FETCH ERROR:",
+            "GET REPOSTS ERROR:",
             repr(e)
         )
 
-        return "❌ خطا در دریافت گزارش."
+        return source, []
 
     # -----------------------------------------------------
     # فقط مقصدهای فعال
@@ -2503,195 +2860,45 @@ def generate_report():
 
     active_channels = get_active_channels()
 
-    active_ids = {
-        str(row.get("chat_id"))
-        for row in active_channels
-        if row.get("chat_id")
-    }
+    active_ids = set()
 
-    rows = [
-        row
-        for row in rows
-        if str(
-            row.get("destination_channel_id")
-        ) in active_ids
-    ]
+    for row in active_channels:
 
-    # =====================================================
-    # SOURCE LINK
-    # =====================================================
-
-    source_link = source.get(
-        "message_link"
-    )
-
-    if not source_link:
-
-        source_link = resolve_message_link(
-            source.get("username"),
-            source.get("channel_id"),
-            source.get("message_id")
+        chat_id = row.get(
+            "chat_id"
         )
 
-        if source_link:
+        if chat_id is not None:
 
-            set_setting(
-                "selected_source_message_link",
-                source_link
+            active_ids.add(
+                str(chat_id)
             )
 
-    # =====================================================
-    # HEADER
-    # =====================================================
+    filtered = []
 
-    text = (
-        "📊 <b>گزارش همین پست</b>\n\n"
-        f"📡 <b>مبدأ:</b> "
-        f"{html_text(source.get('title') or '-')}\n"
-        f"🆔 <b>شناسه پست:</b> "
-        f"<code>{html_text(source_message_id)}</code>\n"
-    )
+    for row in rows:
 
-    # -----------------------------------------------------
-    # لینک مبدأ
-    # -----------------------------------------------------
-
-    if source_link:
-
-        text += (
-            "\n"
-            "🔵 <b>مشاهده پست مبدأ:</b>\n"
-            f"<code>{html_text(source_link)}</code>\n"
-        )
-
-    else:
-
-        text += (
-            "\n🔵 ⚠️ لینک پست مبدأ در دسترس نیست.\n"
-        )
-
-    # =====================================================
-    # COUNT
-    # =====================================================
-
-    text += (
-        f"\n📈 <b>تعداد بازنشر فعال:</b> "
-        f"{to_persian_digits(len(rows))}\n"
-    )
-
-    if not rows:
-
-        return text + (
-            "\nℹ️ هنوز بازنشری از این پست "
-            "در مقصدهای فعال ثبت نشده است."
-        )
-
-    text += "\n"
-
-    # =====================================================
-    # DESTINATIONS
-    # =====================================================
-
-    for index, row in enumerate(
-        rows,
-        start=1
-    ):
-
-        destination_title = (
-            row.get("destination_title")
-            or "-"
-        )
-
-        destination_username = clean_username(
-            row.get("destination_username")
-        )
-
-        destination_chat_id = row.get(
+        destination_id = row.get(
             "destination_channel_id"
         )
 
-        destination_message_id = row.get(
-            "destination_message_id"
-        )
+        if destination_id is None:
+            continue
 
-        # -------------------------------------------------
-        # اول لینک ذخیره‌شده را بررسی می‌کنیم
-        # -------------------------------------------------
+        if str(destination_id) in active_ids:
 
-        destination_link = (
-            row.get("destination_message_link")
-            or ""
-        )
+            filtered.append(row)
 
-        # -------------------------------------------------
-        # اگر لینک ذخیره‌شده نداریم، دوباره بساز
-        # -------------------------------------------------
+    return source, filtered
 
-        if not destination_link:
 
-            destination_link = resolve_message_link(
-                destination_username,
-                destination_chat_id,
-                destination_message_id
-            )
-
-        message_title = (
-            row.get("message_title")
-            or "بدون عنوان"
-        )
-
-        created_at = format_iran_datetime(
-            row.get("created_at")
-        )
-
-        text += (
-            f"<b>{to_persian_digits(index)}.</b> "
-            f"📡 {html_text(destination_title)}\n"
-        )
-
-        if destination_username:
-
-            text += (
-                f"   🔖 @{html_text(destination_username)}\n"
-            )
-
-        text += (
-            f"   📝 {html_text(message_title)}\n"
-            f"   🕐 {html_text(created_at)}\n"
-        )
-
-        # -------------------------------------------------
-        # لینک مقصد
-        # -------------------------------------------------
-
-        if destination_link:
-
-            text += (
-                f"   🟢 <b>مشاهده پست مقصد:</b>\n"
-                f"   <code>{html_text(destination_link)}</code>\n"
-            )
-
-        else:
-
-            text += (
-                "   🟢 ⚠️ لینک مستقیم مقصد در دسترس نیست.\n"
-            )
-
-        text += "\n"
-
-    return text
-
+# =========================================================
+# REPORT MARKDOWN
+# =========================================================
 
 def generate_report_markdown():
 
-    """
-    نسخه Markdown گزارش.
-    برای اینکه لینک‌ها واقعاً به صورت
-    [مشاهده پست](URL)
-    نمایش داده شوند.
-    """
-
-    source = get_selected_source()
+    source, rows = get_reposts_for_selected_source()
 
     if not source.get("channel_id"):
 
@@ -2710,61 +2917,9 @@ def generate_report_markdown():
         source.get("message_id")
     )
 
-    try:
-
-        result = (
-            supabase
-            .table("reposts")
-            .select("*")
-            .eq(
-                "source_channel_id",
-                source_channel_id
-            )
-            .eq(
-                "source_message_id",
-                source_message_id
-            )
-            .order(
-                "created_at",
-                desc=True
-            )
-            .execute()
-        )
-
-        rows = result.data or []
-
-    except Exception as e:
-
-        print(
-            "REPORT MARKDOWN FETCH ERROR:",
-            repr(e)
-        )
-
-        return "❌ خطا در دریافت گزارش."
-
     # -----------------------------------------------------
-    # فقط مقصدهای فعال
+    # لینک مبدأ
     # -----------------------------------------------------
-
-    active_channels = get_active_channels()
-
-    active_ids = {
-        str(row.get("chat_id"))
-        for row in active_channels
-        if row.get("chat_id")
-    }
-
-    rows = [
-        row
-        for row in rows
-        if str(
-            row.get("destination_channel_id")
-        ) in active_ids
-    ]
-
-    # =====================================================
-    # SOURCE LINK
-    # =====================================================
 
     source_link = source.get(
         "message_link"
@@ -2784,10 +2939,6 @@ def generate_report_markdown():
                 "selected_source_message_link",
                 source_link
             )
-
-    # =====================================================
-    # HEADER
-    # =====================================================
 
     text = (
         "📊 *گزارش همین پست*\n\n"
@@ -2812,12 +2963,9 @@ def generate_report_markdown():
     else:
 
         text += (
-            "\n🔵 ⚠️ لینک پست مبدأ در دسترس نیست.\n"
+            "\n"
+            "🔵 ⚠️ لینک پست مبدأ در دسترس نیست.\n"
         )
-
-    # =====================================================
-    # COUNT
-    # =====================================================
 
     text += (
         f"\n📈 *تعداد بازنشر فعال:* "
@@ -2827,17 +2975,20 @@ def generate_report_markdown():
     if not rows:
 
         text += (
-            "\nℹ️ هنوز بازنشری از این پست "
-            "در مقصدهای فعال ثبت نشده است."
+            "\n"
+            "ℹ️ هنوز بازنشری از این پست "
+            "در مقصدهای فعال ثبت نشده است.\n\n"
+            "💡 توجه: ربات فقط بازنشرهایی را ثبت می‌کند "
+            "که بعد از انتخاب پست مبدأ دریافت شوند."
         )
 
         return text
 
     text += "\n"
 
-    # =====================================================
+    # -----------------------------------------------------
     # DESTINATIONS
-    # =====================================================
+    # -----------------------------------------------------
 
     for index, row in enumerate(
         rows,
@@ -2861,18 +3012,12 @@ def generate_report_markdown():
             "destination_message_id"
         )
 
-        # -------------------------------------------------
-        # لینک ذخیره‌شده
-        # -------------------------------------------------
-
         destination_link = (
-            row.get("destination_message_link")
+            row.get(
+                "destination_message_link"
+            )
             or ""
         )
-
-        # -------------------------------------------------
-        # اگر موجود نبود، دوباره بساز
-        # -------------------------------------------------
 
         if not destination_link:
 
@@ -2922,6 +3067,167 @@ def generate_report_markdown():
         else:
 
             text += (
+                "   "
+                "🟢 ⚠️ لینک مستقیم مقصد در دسترس نیست.\n"
+            )
+
+        text += "\n"
+
+    return text
+
+
+# =========================================================
+# REPORT HTML
+# =========================================================
+
+def generate_report():
+
+    source, rows = get_reposts_for_selected_source()
+
+    if not source.get("channel_id"):
+
+        return (
+            "📊 <b>گزارش بازنشر</b>\n\n"
+            "⚠️ هنوز پست مبدأ انتخاب نشده است.\n\n"
+            "یک پست را از کانال مبدأ برای ربات "
+            "Forward کنید."
+        )
+
+    source_message_id = str(
+        source.get("message_id")
+    )
+
+    source_link = source.get(
+        "message_link"
+    )
+
+    if not source_link:
+
+        source_link = resolve_message_link(
+            source.get("username"),
+            source.get("channel_id"),
+            source.get("message_id")
+        )
+
+        if source_link:
+
+            set_setting(
+                "selected_source_message_link",
+                source_link
+            )
+
+    text = (
+        "📊 <b>گزارش همین پست</b>\n\n"
+        f"📡 <b>مبدأ:</b> "
+        f"{html_text(source.get('title') or '-')}\n"
+        f"🆔 <b>شناسه پست:</b> "
+        f"<code>{html_text(source_message_id)}</code>\n"
+    )
+
+    if source_link:
+
+        text += (
+            "\n"
+            f"🔵 <b>مشاهده پست مبدأ:</b>\n"
+            f"<code>{html_text(source_link)}</code>\n"
+        )
+
+    else:
+
+        text += (
+            "\n"
+            "🔵 ⚠️ لینک پست مبدأ در دسترس نیست.\n"
+        )
+
+    text += (
+        f"\n📈 <b>تعداد بازنشر فعال:</b> "
+        f"{to_persian_digits(len(rows))}\n"
+    )
+
+    if not rows:
+
+        return text + (
+            "\n"
+            "ℹ️ هنوز بازنشری از این پست "
+            "در مقصدهای فعال ثبت نشده است.\n\n"
+            "💡 ربات فقط بازنشرهایی را ثبت می‌کند "
+            "که بعد از انتخاب پست مبدأ دریافت شوند."
+        )
+
+    text += "\n"
+
+    for index, row in enumerate(
+        rows,
+        start=1
+    ):
+
+        destination_title = (
+            row.get("destination_title")
+            or "-"
+        )
+
+        destination_username = clean_username(
+            row.get("destination_username")
+        )
+
+        destination_chat_id = row.get(
+            "destination_channel_id"
+        )
+
+        destination_message_id = row.get(
+            "destination_message_id"
+        )
+
+        destination_link = (
+            row.get(
+                "destination_message_link"
+            )
+            or ""
+        )
+
+        if not destination_link:
+
+            destination_link = resolve_message_link(
+                destination_username,
+                destination_chat_id,
+                destination_message_id
+            )
+
+        message_title = (
+            row.get("message_title")
+            or "بدون عنوان"
+        )
+
+        created_at = format_iran_datetime(
+            row.get("created_at")
+        )
+
+        text += (
+            f"<b>{to_persian_digits(index)}.</b> "
+            f"📡 {html_text(destination_title)}\n"
+        )
+
+        if destination_username:
+
+            text += (
+                f"   🔖 @{html_text(destination_username)}\n"
+            )
+
+        text += (
+            f"   📝 {html_text(message_title)}\n"
+            f"   🕐 {html_text(created_at)}\n"
+        )
+
+        if destination_link:
+
+            text += (
+                f"   🟢 <b>مشاهده پست مقصد:</b>\n"
+                f"   <code>{html_text(destination_link)}</code>\n"
+            )
+
+        else:
+
+            text += (
                 "   🟢 ⚠️ لینک مستقیم مقصد در دسترس نیست.\n"
             )
 
@@ -2931,7 +3237,7 @@ def generate_report_markdown():
 
 
 # =========================================================
-# DELETE ALL REPORTS
+# DELETE REPORTS
 # =========================================================
 
 def get_reposts_count():
@@ -2945,7 +3251,9 @@ def get_reposts_count():
             .execute()
         )
 
-        return len(result.data or [])
+        return len(
+            result.data or []
+        )
 
     except Exception as e:
 
@@ -3036,7 +3344,9 @@ def generate_channels_list():
             row.get("username")
         )
 
-        chat_id = row.get("chat_id")
+        chat_id = row.get(
+            "chat_id"
+        )
 
         text += (
             f"<b>{to_persian_digits(index)}.</b> "
@@ -3231,17 +3541,18 @@ def send_help(chat_id, user_id):
             "🔹 <b>گزارش همین پست</b>\n"
             "بعد از ارسال پست مبدأ، دکمه "
             "«📊 گزارش همین پست» زیر پیام ظاهر می‌شود.\n\n"
+            "🔹 <b>ثبت بازنشر</b>\n"
+            "بعد از انتخاب پست مبدأ، اگر همان پست "
+            "در یکی از مقصدهای فعال Forward شود، "
+            "ربات آن را ثبت و گزارش می‌کند.\n\n"
             "🔹 <b>افزودن مقصد</b>\n"
-            "از گزینه «➕ افزودن مقصد» استفاده کنید "
-            "یا دستور زیر را بفرستید:\n"
             "<code>/addchannel @username</code>\n\n"
             "🔹 <b>حذف مقصد</b>\n"
             "<code>/removechannel @username</code>\n\n"
             "🔹 <b>گزارش کلی</b>\n"
             "از «📊 گزارش بازنشر» استفاده کنید.\n\n"
             "🔹 <b>پاک کردن گزارش‌ها</b>\n"
-            "فقط مالک ربات می‌تواند همه گزارش‌های "
-            "قبلی را حذف کند.\n\n"
+            "فقط مالک ربات می‌تواند گزارش‌ها را حذف کند.\n\n"
             "🔹 <b>همگام‌سازی</b>\n"
             "برای بررسی مقصدهای ثبت‌شده از گزینه "
             "«🔄 همگام‌سازی» استفاده کنید.\n\n"
@@ -3556,8 +3867,7 @@ def handle_command(
         send_message(
             chat_id,
             "⚠️ <b>حذف کلیه گزارش‌ها</b>\n\n"
-            "با تأیید این عملیات، تمام گزارش‌های "
-            "بازنشر قبلی از جدول گزارش‌ها حذف می‌شوند.\n\n"
+            "تمام گزارش‌های بازنشر قبلی حذف می‌شوند.\n\n"
             "این عملیات قابل بازگشت نیست.",
             clear_reports_keyboard()
         )
@@ -3843,10 +4153,6 @@ def handle_button(
             "➕ <b>افزودن مقصد</b>\n\n"
             "نام کاربری مقصد با @ یا شناسه عددی را "
             "ارسال کنید.\n\n"
-            "مثال:\n"
-            "<code>@example</code>\n\n"
-            "یا:\n"
-            "<code>-100123456789</code>\n\n"
             "برای انصراف /cancel را بفرستید."
         )
 
@@ -4023,7 +4329,7 @@ def handle_button(
 
 
 # =========================================================
-# CALLBACK QUERY HANDLER
+# CALLBACK QUERY
 # =========================================================
 
 def process_callback_query(callback_query):
@@ -4031,7 +4337,9 @@ def process_callback_query(callback_query):
     if not callback_query:
         return
 
-    callback_id = callback_query.get("id")
+    callback_id = callback_query.get(
+        "id"
+    )
 
     data = (
         callback_query.get("data")
@@ -4043,7 +4351,9 @@ def process_callback_query(callback_query):
         or {}
     )
 
-    user_id = from_user.get("id")
+    user_id = from_user.get(
+        "id"
+    )
 
     message = (
         callback_query.get("message")
@@ -4055,11 +4365,9 @@ def process_callback_query(callback_query):
         or {}
     )
 
-    chat_id = chat.get("id")
-
-    # -----------------------------------------------------
-    # پاسخ اولیه
-    # -----------------------------------------------------
+    chat_id = chat.get(
+        "id"
+    )
 
     if callback_id:
 
@@ -4133,8 +4441,7 @@ def process_callback_query(callback_query):
                     "✅ <b>گزارش‌ها پاک شدند.</b>\n\n"
                     f"🗑 تعداد گزارش‌های حذف‌شده: "
                     f"<b>{to_persian_digits(count)}</b>\n\n"
-                    "گزارش‌های جدید از این لحظه دوباره "
-                    "ثبت خواهند شد."
+                    "گزارش‌های جدید دوباره ثبت خواهند شد."
                 )
 
             else:
@@ -4186,9 +4493,13 @@ def handle_pending_action(
     user
 ):
 
-    key = str(chat_id)
+    key = str(
+        chat_id
+    )
 
-    action = PENDING_ACTIONS.get(key)
+    action = PENDING_ACTIONS.get(
+        key
+    )
 
     if not action:
         return False
@@ -4354,7 +4665,9 @@ def process_private_message(message):
     if not message:
         return
 
-    chat = message.get("chat")
+    chat = message.get(
+        "chat"
+    )
 
     user = (
         message.get("from")
@@ -4364,14 +4677,20 @@ def process_private_message(message):
     if not chat:
         return
 
-    chat_id = chat.get("id")
+    chat_id = chat.get(
+        "id"
+    )
 
     if chat_id is None:
         return
 
-    save_bot_user(user)
+    save_bot_user(
+        user
+    )
 
-    user_id = user.get("id")
+    user_id = user.get(
+        "id"
+    )
 
     text = (
         message.get("text")
@@ -4392,7 +4711,7 @@ def process_private_message(message):
             return
 
     # -----------------------------------------------------
-    # PENDING ACTION
+    # PENDING
     # -----------------------------------------------------
 
     if handle_pending_action(
@@ -4419,11 +4738,20 @@ def process_private_message(message):
     # FORWARD SOURCE
     # -----------------------------------------------------
 
-    source = extract_forward(message)
+    source = extract_forward(
+        message
+    )
 
     if source:
 
         if not is_admin(user_id):
+
+            send_message(
+                chat_id,
+                "⛔ فقط مدیران می‌توانند "
+                "پست مبدأ انتخاب کنند."
+            )
+
             return
 
         set_selected_source(
@@ -4458,32 +4786,44 @@ def print_update_debug(update):
     if "message" in update:
 
         print("MESSAGE:")
-        print(update["message"])
+        print(
+            update["message"]
+        )
 
     if "channel_post" in update:
 
         print("CHANNEL POST:")
-        print(update["channel_post"])
+        print(
+            update["channel_post"]
+        )
 
     if "callback_query" in update:
 
         print("CALLBACK QUERY:")
-        print(update["callback_query"])
+        print(
+            update["callback_query"]
+        )
 
     if "my_chat_member" in update:
 
         print("MY CHAT MEMBER:")
-        print(update["my_chat_member"])
+        print(
+            update["my_chat_member"]
+        )
 
     if "chat_member" in update:
 
         print("CHAT MEMBER:")
-        print(update["chat_member"])
+        print(
+            update["chat_member"]
+        )
 
     if "chat_join_request" in update:
 
         print("CHAT JOIN REQUEST:")
-        print(update["chat_join_request"])
+        print(
+            update["chat_join_request"]
+        )
 
     print("=" * 100)
     print("🔥 END UPDATE")
@@ -4497,7 +4837,9 @@ def print_update_debug(update):
 
 def process_update(update):
 
-    print_update_debug(update)
+    print_update_debug(
+        update
+    )
 
     # -----------------------------------------------------
     # CALLBACK
@@ -4550,7 +4892,9 @@ def process_update(update):
     # MESSAGE
     # -----------------------------------------------------
 
-    message = update.get("message")
+    message = update.get(
+        "message"
+    )
 
     if not message:
 
@@ -4561,12 +4905,16 @@ def process_update(update):
     if not message:
         return
 
-    chat = message.get("chat")
+    chat = message.get(
+        "chat"
+    )
 
     if not chat:
         return
 
-    chat_type = chat.get("type")
+    chat_type = chat.get(
+        "type"
+    )
 
     # -----------------------------------------------------
     # GROUP SERVICE
