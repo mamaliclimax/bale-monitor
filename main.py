@@ -2,7 +2,7 @@ import os
 import time
 import hashlib
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from supabase import create_client
 
@@ -83,6 +83,181 @@ def send_message(chat_id, text):
 
 
 # =========================================================
+# PERSIAN DATE / TIME
+# =========================================================
+
+def gregorian_to_jalali(gy, gm, gd):
+
+    g_days_in_month = [
+        31, 28, 31, 30, 31, 30,
+        31, 31, 30, 31, 30, 31
+    ]
+
+    j_days_in_month = [
+        31, 31, 31, 31, 31, 31,
+        30, 30, 30, 30, 30, 29
+    ]
+
+    gy -= 1600
+    gm -= 1
+    gd -= 1
+
+    g_day_no = (
+        365 * gy
+        + (gy + 3) // 4
+        - (gy + 99) // 100
+        + (gy + 399) // 400
+    )
+
+    for i in range(gm):
+        g_day_no += g_days_in_month[i]
+
+    if (
+        gm > 1
+        and (gy + 1600) % 4 == 0
+        and (
+            (gy + 1600) % 100 != 0
+            or (gy + 1600) % 400 == 0
+        )
+    ):
+        g_day_no += 1
+
+    g_day_no += gd
+
+    j_day_no = g_day_no - 79
+
+    j_np = j_day_no // 12053
+    j_day_no %= 12053
+
+    jy = (
+        979
+        + 33 * j_np
+        + 4 * (j_day_no // 1461)
+    )
+
+    j_day_no %= 1461
+
+    if j_day_no >= 366:
+
+        jy += (j_day_no - 1) // 365
+
+        j_day_no = (
+            j_day_no - 1
+        ) % 365
+
+    i = 0
+
+    while (
+        i < 11
+        and j_day_no >= j_days_in_month[i]
+    ):
+
+        j_day_no -= j_days_in_month[i]
+
+        i += 1
+
+    jm = i + 1
+    jd = j_day_no + 1
+
+    return jy, jm, jd
+
+
+def to_shamsi(value):
+
+    if not value:
+        return "نامشخص"
+
+    try:
+
+        value = str(value).strip()
+
+        if value.endswith("Z"):
+
+            value = (
+                value[:-1]
+                + "+00:00"
+            )
+
+        dt = datetime.fromisoformat(
+            value
+        )
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        iran_tz = timezone(
+            timedelta(
+                hours=3,
+                minutes=30
+            )
+        )
+
+        dt = dt.astimezone(
+            iran_tz
+        )
+
+        jy, jm, jd = (
+            gregorian_to_jalali(
+                dt.year,
+                dt.month,
+                dt.day
+            )
+        )
+
+        return (
+            f"{jy:04d}/{jm:02d}/{jd:02d}"
+            f" - "
+            f"{dt.hour:02d}:"
+            f"{dt.minute:02d}:"
+            f"{dt.second:02d}"
+        )
+
+    except Exception as e:
+
+        print(
+            "SHAMSI DATE ERROR:",
+            e
+        )
+
+        return str(value)
+
+
+def now_shamsi():
+
+    iran_tz = timezone(
+        timedelta(
+            hours=3,
+            minutes=30
+        )
+    )
+
+    now = datetime.now(
+        timezone.utc
+    ).astimezone(
+        iran_tz
+    )
+
+    jy, jm, jd = (
+        gregorian_to_jalali(
+            now.year,
+            now.month,
+            now.day
+        )
+    )
+
+    return (
+        f"{jy:04d}/{jm:02d}/{jd:02d}"
+        f" - "
+        f"{now.hour:02d}:"
+        f"{now.minute:02d}:"
+        f"{now.second:02d}"
+    )
+
+
+# =========================================================
 # SUPABASE SETTINGS
 # =========================================================
 
@@ -94,7 +269,10 @@ def get_setting(key):
             supabase
             .table("bot_settings")
             .select("value")
-            .eq("key", key)
+            .eq(
+                "key",
+                key
+            )
             .limit(1)
             .execute()
         )
@@ -105,7 +283,10 @@ def get_setting(key):
 
     except Exception as e:
 
-        print("GET SETTING ERROR:", e)
+        print(
+            "GET SETTING ERROR:",
+            e
+        )
 
     return None
 
@@ -114,7 +295,9 @@ def save_setting(key, value):
 
     try:
 
-        supabase.table("bot_settings").upsert(
+        supabase.table(
+            "bot_settings"
+        ).upsert(
             {
                 "key": key,
                 "value": str(value)
@@ -125,7 +308,10 @@ def save_setting(key, value):
 
     except Exception as e:
 
-        print("SAVE SETTING ERROR:", e)
+        print(
+            "SAVE SETTING ERROR:",
+            e
+        )
 
         return False
 
@@ -138,19 +324,26 @@ def load_owner():
 
     global OWNER_ID
 
-    value = get_setting("owner_id")
+    value = get_setting(
+        "owner_id"
+    )
 
     if value:
 
         try:
 
-            OWNER_ID = int(value)
+            OWNER_ID = int(
+                value
+            )
 
         except:
 
             OWNER_ID = None
 
-    print("OWNER:", OWNER_ID)
+    print(
+        "OWNER:",
+        OWNER_ID
+    )
 
 
 def ensure_owner(chat_id):
@@ -198,16 +391,19 @@ def clean_username(username):
         ""
     )
 
-    username = username.strip("/")
+    username = username.strip(
+        "/"
+    )
 
     if username.startswith("@"):
 
         username = username[1:]
 
-    # اگر لینک پست داده شده باشد
     if "/" in username:
 
-        username = username.split("/")[0]
+        username = username.split(
+            "/"
+        )[0]
 
     return username.lower()
 
@@ -292,7 +488,10 @@ def set_source(username):
 
     if not username:
 
-        return False, "نام کانال وارد نشده است."
+        return (
+            False,
+            "نام کانال وارد نشده است."
+        )
 
     chat = get_chat(
         "@" + username
@@ -340,11 +539,16 @@ def set_source(username):
     )
 
     return True, {
-        "username": clean_username(
-            real_username
-        ),
-        "id": channel_id,
-        "title": title
+        "username":
+            clean_username(
+                real_username
+            ),
+
+        "id":
+            channel_id,
+
+        "title":
+            title
     }
 
 
@@ -355,7 +559,9 @@ def set_source(username):
 def channel_hash(username):
 
     value = hashlib.sha256(
-        username.encode("utf-8")
+        username.encode(
+            "utf-8"
+        )
     ).hexdigest()
 
     return int(
@@ -372,9 +578,11 @@ def add_channel(username):
 
     if not username:
 
-        return False, "نام کانال وارد نشده است."
+        return (
+            False,
+            "نام کانال وارد نشده است."
+        )
 
-    # بررسی وجود قبلی
     try:
 
         existing = (
@@ -414,7 +622,6 @@ def add_channel(username):
             e
         )
 
-    # بررسی سقف ۱۰۰ کانال
     try:
 
         count_result = (
@@ -607,7 +814,7 @@ def extract_forward(message):
     forward_message_id = None
 
     # -----------------------------------------------------
-    # ساختار مستقیم Forward
+    # Direct forward
     # -----------------------------------------------------
 
     forward_from_chat = message.get(
@@ -617,11 +824,15 @@ def extract_forward(message):
     if forward_from_chat:
 
         forward_chat_id = (
-            forward_from_chat.get("id")
+            forward_from_chat.get(
+                "id"
+            )
         )
 
         forward_username = (
-            forward_from_chat.get("username")
+            forward_from_chat.get(
+                "username"
+            )
         )
 
         forward_message_id = (
@@ -631,7 +842,7 @@ def extract_forward(message):
         )
 
     # -----------------------------------------------------
-    # ساختار forward_origin
+    # forward_origin
     # -----------------------------------------------------
 
     forward_origin = message.get(
@@ -641,7 +852,9 @@ def extract_forward(message):
     if forward_origin:
 
         if (
-            forward_origin.get("type")
+            forward_origin.get(
+                "type"
+            )
             == "channel"
         ):
 
@@ -652,14 +865,18 @@ def extract_forward(message):
 
             if chat:
 
-                forward_chat_id = chat.get(
-                    "id",
-                    forward_chat_id
+                forward_chat_id = (
+                    chat.get(
+                        "id",
+                        forward_chat_id
+                    )
                 )
 
-                forward_username = chat.get(
-                    "username",
-                    forward_username
+                forward_username = (
+                    chat.get(
+                        "username",
+                        forward_username
+                    )
                 )
 
             forward_message_id = (
@@ -670,17 +887,21 @@ def extract_forward(message):
             )
 
     return {
-        "chat_id": forward_chat_id,
 
-        "username": (
-            clean_username(
-                forward_username
-            )
-            if forward_username
-            else None
-        ),
+        "chat_id":
+            forward_chat_id,
 
-        "message_id": forward_message_id
+        "username":
+            (
+                clean_username(
+                    forward_username
+                )
+                if forward_username
+                else None
+            ),
+
+        "message_id":
+            forward_message_id
     }
 
 
@@ -697,7 +918,9 @@ def is_from_source(forward):
         return False
 
     source_username = clean_username(
-        source.get("username")
+        source.get(
+            "username"
+        )
     )
 
     source_id = source.get(
@@ -705,15 +928,20 @@ def is_from_source(forward):
     )
 
     forward_username = clean_username(
-        forward.get("username")
+        forward.get(
+            "username"
+        )
     )
 
     forward_id = forward.get(
         "chat_id"
     )
 
-    # ابتدا بررسی شناسه کانال
-    if source_id and forward_id:
+    # بررسی ID
+    if (
+        source_id
+        and forward_id
+    ):
 
         try:
 
@@ -727,7 +955,7 @@ def is_from_source(forward):
 
             pass
 
-    # سپس بررسی username
+    # بررسی username
     if (
         source_username
         and forward_username
@@ -753,8 +981,12 @@ def save_repost(
     destination
 ):
 
-    destination_username = clean_username(
-        destination.get("username")
+    destination_username = (
+        clean_username(
+            destination.get(
+                "username"
+            )
+        )
     )
 
     destination_message_id = (
@@ -774,18 +1006,26 @@ def save_repost(
     data = {
 
         "source_channel_id":
-            source.get("id"),
+            source.get(
+                "id"
+            ),
 
         "source_username":
             clean_username(
-                source.get("username")
+                source.get(
+                    "username"
+                )
             ),
 
         "source_message_id":
-            forward.get("message_id"),
+            forward.get(
+                "message_id"
+            ),
 
         "destination_channel_id":
-            destination.get("chat_id"),
+            destination.get(
+                "chat_id"
+            ),
 
         "destination_username":
             destination_username,
@@ -808,7 +1048,6 @@ def save_repost(
 
     try:
 
-        # جلوگیری از ثبت دوباره
         existing = (
             supabase
             .table("reposts")
@@ -862,11 +1101,17 @@ def send_repost_alert(
         return
 
     source_username = clean_username(
-        source.get("username")
+        source.get(
+            "username"
+        )
     )
 
-    destination_username = clean_username(
-        destination.get("username")
+    destination_username = (
+        clean_username(
+            destination.get(
+                "username"
+            )
+        )
     )
 
     destination_title = (
@@ -889,19 +1134,199 @@ def send_repost_alert(
         )
     )
 
-    destination_message_id = (
-        destination.get(
-            "message_id"
+    # فقط لینک پست مرجع
+    source_link = ""
+
+    if (
+        source_username
+        and source_message_id
+    ):
+
+        source_link = (
+            "\n🔗 پست مرجع: "
+            f"https://ble.ir/"
+            f"{source_username}/"
+            f"{source_message_id}"
+        )
+
+    text = (
+        "🚨 بازنشر از کانال مرجع پیدا شد!\n\n"
+
+        f"🎯 کانال مرجع: "
+        f"@{source_username}\n\n"
+
+        f"📢 کانال مقصد: "
+        f"{destination_title}\n"
+
+        f"🔹 @{destination_username}\n\n"
+
+        f"📝 عنوان پیام: "
+        f"{message_title}\n\n"
+
+        f"🕒 زمان شناسایی: "
+        f"{now_shamsi()}"
+
+        f"{source_link}"
+    )
+
+    send_message(
+        OWNER_ID,
+        text
+    )
+
+
+# =========================================================
+# PRIVATE REPOST
+# =========================================================
+
+def save_private_repost(
+    source,
+    forward,
+    destination
+):
+
+    data = {
+
+        "source_channel_id":
+            source.get(
+                "id"
+            ),
+
+        "source_username":
+            clean_username(
+                source.get(
+                    "username"
+                )
+            ),
+
+        "source_message_id":
+            forward.get(
+                "message_id"
+            ),
+
+        "destination_channel_id":
+            destination.get(
+                "chat_id"
+            ),
+
+        "destination_username":
+            clean_username(
+                destination.get(
+                    "username"
+                )
+            ),
+
+        "destination_message_id":
+            None,
+
+        "destination_title":
+            destination.get(
+                "title",
+                destination.get(
+                    "username"
+                )
+            ),
+
+        "message_title":
+            destination.get(
+                "message_title",
+                ""
+            )
+    }
+
+    try:
+
+        existing = (
+            supabase
+            .table("reposts")
+            .select("id")
+            .eq(
+                "source_username",
+                data[
+                    "source_username"
+                ]
+            )
+            .eq(
+                "source_message_id",
+                data[
+                    "source_message_id"
+                ]
+            )
+            .eq(
+                "destination_username",
+                data[
+                    "destination_username"
+                ]
+            )
+            .limit(1)
+            .execute()
+        )
+
+        if existing.data:
+
+            return False
+
+        supabase.table(
+            "reposts"
+        ).insert(
+            data
+        ).execute()
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "SAVE PRIVATE REPOST ERROR:",
+            e
+        )
+
+        return False
+
+
+def send_private_repost_alert(
+    source,
+    forward,
+    destination
+):
+
+    if OWNER_ID is None:
+
+        return
+
+    source_username = clean_username(
+        source.get(
+            "username"
         )
     )
 
-    now = datetime.now().strftime(
-        "%Y/%m/%d - %H:%M:%S"
+    destination_username = (
+        clean_username(
+            destination.get(
+                "username"
+            )
+        )
     )
 
-    # -----------------------------------------------------
-    # لینک پست مرجع
-    # -----------------------------------------------------
+    destination_title = (
+        destination.get(
+            "title"
+        )
+        or destination_username
+    )
+
+    message_title = (
+        destination.get(
+            "message_title"
+        )
+        or "بدون عنوان"
+    )
+
+    source_message_id = (
+        forward.get(
+            "message_id"
+        )
+    )
 
     source_link = ""
 
@@ -917,55 +1342,223 @@ def send_repost_alert(
             f"{source_message_id}"
         )
 
-    # -----------------------------------------------------
-    # لینک پست مقصد
-    # -----------------------------------------------------
-
-    destination_link = ""
-
-    if (
-        destination_username
-        and destination_message_id
-    ):
-
-        destination_link = (
-            "\n🔗 پست مقصد: "
-            f"https://ble.ir/"
-            f"{destination_username}/"
-            f"{destination_message_id}"
-        )
-
     text = (
-        "🚨 بازنشر از کانال مرجع پیدا شد!\n\n"
+        "🚨 بازنشر ثبت شد!\n\n"
 
         f"🎯 کانال مرجع: "
-        f"@{source_username}\n"
-
-        f"🆔 پست مرجع: "
-        f"{source_message_id}\n\n"
+        f"@{source_username}\n\n"
 
         f"📢 کانال مقصد: "
         f"{destination_title}\n"
 
-        f"🔹 @{destination_username}\n"
+        f"🔹 @{destination_username}\n\n"
 
         f"📝 عنوان پیام: "
         f"{message_title}\n\n"
 
-        f"🆔 پست مقصد: "
-        f"{destination_message_id}\n"
-
         f"🕒 زمان شناسایی: "
-        f"{now}"
+        f"{now_shamsi()}"
 
         f"{source_link}"
-
-        f"{destination_link}"
     )
 
     send_message(
         OWNER_ID,
         text
+    )
+
+
+# =========================================================
+# PRIVATE FORWARDED MESSAGE
+# =========================================================
+
+def process_private_forward(message):
+
+    chat = message.get(
+        "chat",
+        {}
+    )
+
+    chat_id = chat.get(
+        "id"
+    )
+
+    if OWNER_ID is None:
+
+        return
+
+    if chat_id != OWNER_ID:
+
+        return
+
+    forward = extract_forward(
+        message
+    )
+
+    if not forward.get(
+        "message_id"
+    ):
+
+        return
+
+    print(
+        "PRIVATE FORWARD:",
+        forward
+    )
+
+    if not is_from_source(
+        forward
+    ):
+
+        send_message(
+            chat_id,
+
+            "⚠️ این پیام از کانال "
+            "مرجع تعیین‌شده نیست."
+        )
+
+        return
+
+    source = get_source()
+
+    if not source:
+
+        send_message(
+            chat_id,
+
+            "❌ ابتدا کانال مرجع "
+            "را تعیین کنید."
+        )
+
+        return
+
+    pending_channel = get_setting(
+        "pending_private_destination"
+    )
+
+    if not pending_channel:
+
+        send_message(
+            chat_id,
+
+            "✅ پست کانال مرجع شناسایی شد.\n\n"
+
+            "برای ثبت بازنشر، ابتدا "
+            "کانال مقصد را مشخص کنید:\n\n"
+
+            "/repost @channel\n\n"
+
+            "سپس همان پیام فورواردشده "
+            "را برای ربات ارسال کنید."
+        )
+
+        return
+
+    destination_username = (
+        clean_username(
+            pending_channel
+        )
+    )
+
+    destination_chat = get_chat(
+        "@" + destination_username
+    )
+
+    destination_title = (
+        destination_username
+    )
+
+    destination_chat_id = None
+
+    if destination_chat:
+
+        destination_title = (
+            destination_chat.get(
+                "title",
+                destination_username
+            )
+        )
+
+        destination_chat_id = (
+            destination_chat.get(
+                "id"
+            )
+        )
+
+    message_title = (
+        message.get("text")
+        or message.get("caption")
+        or ""
+    ).strip()
+
+    if message_title:
+
+        message_title = (
+            message_title
+            .split("\n")[0]
+            .strip()
+        )
+
+        if len(message_title) > 150:
+
+            message_title = (
+                message_title[:150]
+                + "..."
+            )
+
+    else:
+
+        message_title = "بدون عنوان"
+
+    destination = {
+
+        "chat_id":
+            destination_chat_id,
+
+        "username":
+            destination_username,
+
+        "title":
+            destination_title,
+
+        "message_id":
+            None,
+
+        "message_title":
+            message_title
+    }
+
+    is_new = save_private_repost(
+        source,
+        forward,
+        destination
+    )
+
+    if not is_new:
+
+        send_message(
+            chat_id,
+
+            "⚠️ این بازنشر قبلاً "
+            "ثبت شده است."
+        )
+
+        save_setting(
+            "pending_private_destination",
+            ""
+        )
+
+        return
+
+    send_private_repost_alert(
+        source,
+        forward,
+        destination
+    )
+
+    save_setting(
+        "pending_private_destination",
+        ""
     )
 
 
@@ -980,7 +1573,8 @@ def report():
     if not source:
 
         return (
-            "❌ هنوز کانال مرجع تعیین نشده است."
+            "❌ هنوز کانال مرجع "
+            "تعیین نشده است."
         )
 
     try:
@@ -1011,7 +1605,9 @@ def report():
         )
 
     source_username = clean_username(
-        source.get("username")
+        source.get(
+            "username"
+        )
     )
 
     source_id = source.get(
@@ -1019,10 +1615,6 @@ def report():
     )
 
     filtered = []
-
-    # -----------------------------------------------------
-    # فقط گزارش‌های مربوط به منبع فعلی
-    # -----------------------------------------------------
 
     for row in rows:
 
@@ -1069,10 +1661,6 @@ def report():
                 row
             )
 
-    # -----------------------------------------------------
-    # بدون گزارش
-    # -----------------------------------------------------
-
     if not filtered:
 
         return (
@@ -1082,13 +1670,8 @@ def report():
             f"@{source_username}\n\n"
 
             "هنوز هیچ بازنشر مستقیمی "
-            "از این کانال در کانال‌های "
-            "تحت نظر شناسایی نشده است."
+            "از این کانال شناسایی نشده است."
         )
-
-    # -----------------------------------------------------
-    # ساخت گزارش
-    # -----------------------------------------------------
 
     text = (
         "📊 گزارش بازنشرها\n\n"
@@ -1132,56 +1715,38 @@ def report():
             )
         )
 
-        destination_message_id = (
-            row.get(
-                "destination_message_id"
-            )
+        created_at = row.get(
+            "created_at",
+            ""
         )
-
-        created_at = (
-            row.get(
-                "created_at",
-                ""
-            )
-        )
-
-        # -------------------------------------------------
-        # نمایش گزارش
-        # -------------------------------------------------
 
         text += (
             f"{i}️⃣ 📢 "
             f"{destination_title}\n"
 
-            f"   🔹 @{destination}\n"
+            f"   🔹 @{destination}\n\n"
 
             f"   📝 عنوان: "
             f"{message_title}\n"
 
-            f"   🆔 پست مرجع: "
-            f"{source_message_id}\n"
-
-            f"   🆔 پست مقصد: "
-            f"{destination_message_id}\n"
-
-            f"   🕒 {created_at}\n"
+            f"   🕒 "
+            f"{to_shamsi(created_at)}\n"
         )
 
         if (
-            destination
-            and destination_message_id
+            source_username
+            and source_message_id
         ):
 
             text += (
-                f"   🔗 "
+                f"   🔗 پست مرجع: "
                 f"https://ble.ir/"
-                f"{destination}/"
-                f"{destination_message_id}\n"
+                f"{source_username}/"
+                f"{source_message_id}\n"
             )
 
         text += "\n"
 
-        # جلوگیری از طولانی شدن پیام
         if len(text) > 3500:
 
             send_message(
@@ -1215,10 +1780,6 @@ def status():
         "🤖 وضعیت ربات\n\n"
     )
 
-    # -----------------------------------------------------
-    # Source
-    # -----------------------------------------------------
-
     if source:
 
         text += (
@@ -1247,10 +1808,6 @@ def status():
             "❌ تعیین نشده\n\n"
         )
 
-    # -----------------------------------------------------
-    # Channels
-    # -----------------------------------------------------
-
     text += (
         f"📢 تعداد کانال‌های تحت نظر: "
         f"{len(channels)} / 100\n\n"
@@ -1265,9 +1822,22 @@ def status():
             1
         ):
 
+            channel_title = (
+                channel.get(
+                    "title"
+                )
+                or (
+                    "@"
+                    + channel.get(
+                        "username",
+                        ""
+                    )
+                )
+            )
+
             text += (
                 f"{i}. "
-                f"@{channel.get('username')}\n"
+                f"{channel_title}\n"
             )
 
     return text
@@ -1299,11 +1869,9 @@ def handle_command(message):
 
         return
 
-    # -----------------------------------------------------
-    # مالک
-    # -----------------------------------------------------
-
-    if chat.get("type") == "private":
+    if chat.get(
+        "type"
+    ) == "private":
 
         if OWNER_ID is None:
 
@@ -1318,17 +1886,15 @@ def handle_command(message):
 
             return
 
-    # -----------------------------------------------------
-    # Parse command
-    # -----------------------------------------------------
-
     parts = text.split()
 
     command = parts[0].lower()
 
     if "@" in command:
 
-        command = command.split("@")[0]
+        command = command.split(
+            "@"
+        )[0]
 
     args = parts[1:]
 
@@ -1356,6 +1922,9 @@ def handle_command(message):
 
             "/listchannels\n"
             "📢 نمایش کانال‌های تحت نظر\n\n"
+
+            "/repost @channel\n"
+            "📝 ثبت بازنشر با فوروارد خصوصی\n\n"
 
             "/report\n"
             "📊 گزارش بازنشرها\n\n"
@@ -1407,8 +1976,7 @@ def handle_command(message):
                 f"{result['id'] or 'دریافت نشد'}\n\n"
 
                 "از این لحظه بازنشرهای مستقیم "
-                "این کانال در کانال‌های تحت نظر "
-                "شناسایی می‌شوند."
+                "این کانال شناسایی می‌شوند."
             )
 
         else:
@@ -1525,14 +2093,80 @@ def handle_command(message):
             1
         ):
 
+            channel_title = (
+                channel.get(
+                    "title"
+                )
+                or (
+                    "@"
+                    + channel.get(
+                        "username",
+                        ""
+                    )
+                )
+            )
+
             text += (
                 f"{i}. "
-                f"@{channel.get('username')}\n"
+                f"{channel_title}\n"
             )
 
         send_message(
             chat_id,
             text
+        )
+
+        return
+
+    # =====================================================
+    # REPOST
+    # =====================================================
+
+    if command == "/repost":
+
+        if not args:
+
+            send_message(
+                chat_id,
+
+                "❌ کانال مقصد وارد نشده است.\n\n"
+
+                "مثال:\n"
+                "/repost @mammalss\n\n"
+
+                "بعد از آن، پیام فورواردشده "
+                "از کانال مرجع را برای ربات ارسال کنید."
+            )
+
+            return
+
+        destination = clean_username(
+            args[0]
+        )
+
+        if not destination:
+
+            send_message(
+                chat_id,
+                "❌ نام کانال مقصد معتبر نیست."
+            )
+
+            return
+
+        save_setting(
+            "pending_private_destination",
+            destination
+        )
+
+        send_message(
+            chat_id,
+
+            "✅ کانال مقصد ثبت شد:\n\n"
+
+            f"📢 @{destination}\n\n"
+
+            "حالا پیام فورواردشده از کانال "
+            "مرجع را برای ربات ارسال کنید."
         )
 
         return
@@ -1609,10 +2243,6 @@ def process_channel_message(message):
         message_id
     )
 
-    # -----------------------------------------------------
-    # آیا کانال تحت نظر است؟
-    # -----------------------------------------------------
-
     if not is_monitored(
         username
     ):
@@ -1623,10 +2253,6 @@ def process_channel_message(message):
         )
 
         return
-
-    # -----------------------------------------------------
-    # استخراج Forward
-    # -----------------------------------------------------
 
     forward = extract_forward(
         message
@@ -1643,10 +2269,6 @@ def process_channel_message(message):
         forward
     )
 
-    # -----------------------------------------------------
-    # آیا از کانال مرجع است؟
-    # -----------------------------------------------------
-
     if not is_from_source(
         forward
     ):
@@ -1659,10 +2281,6 @@ def process_channel_message(message):
 
     source = get_source()
 
-    # -----------------------------------------------------
-    # عنوان کانال مقصد
-    # -----------------------------------------------------
-
     destination_title = (
         chat.get(
             "title"
@@ -1670,17 +2288,12 @@ def process_channel_message(message):
         or username
     )
 
-    # -----------------------------------------------------
-    # متن یا کپشن
-    # -----------------------------------------------------
-
     message_title = (
         message.get("text")
         or message.get("caption")
         or ""
     ).strip()
 
-    # فقط خط اول به عنوان عنوان
     if message_title:
 
         message_title = (
@@ -1700,10 +2313,6 @@ def process_channel_message(message):
 
         message_title = "بدون عنوان"
 
-    # -----------------------------------------------------
-    # اطلاعات مقصد
-    # -----------------------------------------------------
-
     destination = {
 
         "chat_id":
@@ -1721,10 +2330,6 @@ def process_channel_message(message):
         "message_title":
             message_title
     }
-
-    # -----------------------------------------------------
-    # ذخیره
-    # -----------------------------------------------------
 
     is_new = save_repost(
         source,
@@ -1747,10 +2352,6 @@ def process_channel_message(message):
         username,
         message_id
     )
-
-    # -----------------------------------------------------
-    # گزارش فوری
-    # -----------------------------------------------------
 
     send_repost_alert(
         source,
@@ -1793,9 +2394,23 @@ def process_update(update):
 
     if chat_type == "private":
 
-        handle_command(
+        forward = extract_forward(
             message
         )
+
+        if forward.get(
+            "message_id"
+        ):
+
+            process_private_forward(
+                message
+            )
+
+        else:
+
+            handle_command(
+                message
+            )
 
         return
 
