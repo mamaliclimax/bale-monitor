@@ -368,6 +368,29 @@ def send_message(
     )
 
 
+def answer_callback_query(
+    callback_query_id,
+    text=None,
+    show_alert=False
+):
+
+    data = {
+        "callback_query_id": str(
+            callback_query_id
+        )
+    }
+
+    if text:
+        data["text"] = text
+
+    data["show_alert"] = show_alert
+
+    return bale_request(
+        "answerCallbackQuery",
+        data
+    )
+
+
 def get_updates(offset=None):
 
     data = {
@@ -378,14 +401,49 @@ def get_updates(offset=None):
 
         data["offset"] = offset
 
-    # عمداً allowed_updates تنظیم نشده
-    # تا تمام Updateهای قابل دریافت Bale را ببینیم.
-
     return bale_request(
         "getUpdates",
         data,
         timeout=45
     )
+
+
+# =========================================================
+# INLINE KEYBOARDS
+# =========================================================
+
+def source_report_keyboard():
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "📊 گزارش همین پست",
+                    "callback_data": "report_selected_source"
+                }
+            ]
+        ]
+    }
+
+
+def clear_reports_keyboard():
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "⚠️ بله، همه گزارش‌ها حذف شود",
+                    "callback_data": "confirm_clear_reports"
+                }
+            ],
+            [
+                {
+                    "text": "❌ انصراف",
+                    "callback_data": "cancel_clear_reports"
+                }
+            ]
+        ]
+    }
 
 
 # =========================================================
@@ -423,6 +481,63 @@ def build_bale_message_link(
         f"{chat_id}/"
         f"{message_id}"
     )
+
+
+def resolve_message_link(
+    username,
+    chat_id,
+    message_id
+):
+
+    """
+    اگر username در اطلاعات پیام موجود نبود،
+    با getChat تلاش می‌کند username واقعی مقصد
+    یا مبدأ را پیدا کند.
+    """
+
+    if chat_id is None or message_id is None:
+        return None
+
+    username = clean_username(
+        username
+    )
+
+    if username:
+
+        return build_bale_message_link(
+            username,
+            chat_id,
+            message_id
+        )
+
+    try:
+
+        chat = get_chat(
+            chat_id
+        )
+
+        if chat:
+
+            username = clean_username(
+                chat.get("username")
+            )
+
+            if username:
+
+                return build_bale_message_link(
+                    username,
+                    chat_id,
+                    message_id
+                )
+
+    except Exception as e:
+
+        print(
+            "RESOLVE MESSAGE LINK ERROR:",
+            repr(e)
+        )
+
+    return None
 
 
 # =========================================================
@@ -788,21 +903,12 @@ def update_channel_row(
 
 
 # =========================================================
-# REGISTER CHAT FROM NORMAL MESSAGE
+# REGISTER CHAT
 # =========================================================
 
 def auto_register_chat(
     chat
 ):
-
-    """
-    این تابع فقط اطلاعات چت را ثبت/به‌روزرسانی می‌کند.
-
-    نکته بسیار مهم:
-    پیام عادی به‌تنهایی اجازه فعال‌سازی رکوردی که
-    bot_member=False یا manually_disabled=True دارد
-    را ندارد.
-    """
 
     if not chat:
         return False
@@ -843,10 +949,6 @@ def auto_register_chat(
             chat_id
         )
 
-        # -------------------------------------------------
-        # موجود با chat_id
-        # -------------------------------------------------
-
         if row:
 
             manually_disabled = (
@@ -884,10 +986,6 @@ def auto_register_chat(
                 row["id"],
                 data
             )
-
-        # -------------------------------------------------
-        # موجود با username
-        # -------------------------------------------------
 
         if username:
 
@@ -933,10 +1031,6 @@ def auto_register_chat(
                     data
                 )
 
-        # -------------------------------------------------
-        # رکورد جدید
-        # -------------------------------------------------
-
         (
             supabase
             .table("channels")
@@ -980,11 +1074,6 @@ def activate_chat(
     chat,
     clear_manual=True
 ):
-
-    """
-    فقط زمانی استفاده شود که مشخص است ربات
-    واقعاً وارد چت شده یا ادمین مقصد را دستی اضافه کرده.
-    """
 
     if not chat:
         return False
@@ -1278,7 +1367,7 @@ def manual_remove_channel(
 
 
 # =========================================================
-# SYNC KNOWN CHANNELS
+# SYNC
 # =========================================================
 
 def sync_channels():
@@ -1373,10 +1462,6 @@ def sync_channels():
                 status
             )
 
-            # -------------------------------------------------
-            # خارج شده
-            # -------------------------------------------------
-
             if status in (
                 "left",
                 "kicked"
@@ -1393,10 +1478,6 @@ def sync_channels():
                 removed += 1
 
                 continue
-
-            # -------------------------------------------------
-            # عضو
-            # -------------------------------------------------
 
             if status in (
                 "member",
@@ -1534,6 +1615,27 @@ def extract_forward(
         )
     )
 
+    # بعضی ساختارهای احتمالی Forward
+    if not forward_chat:
+
+        forward_origin = message.get(
+            "forward_origin"
+        )
+
+        if isinstance(
+            forward_origin,
+            dict
+        ):
+
+            forward_chat = (
+                forward_origin.get(
+                    "chat"
+                )
+                or forward_origin.get(
+                    "sender_chat"
+                )
+            )
+
     if not forward_chat:
         return None
 
@@ -1565,6 +1667,27 @@ def extract_forward(
         )
     )
 
+    # بررسی forward_origin
+    if not source_message_id:
+
+        forward_origin = message.get(
+            "forward_origin"
+        )
+
+        if isinstance(
+            forward_origin,
+            dict
+        ):
+
+            source_message_id = (
+                forward_origin.get(
+                    "message_id"
+                )
+                or forward_origin.get(
+                    "forward_from_message_id"
+                )
+            )
+
     if not source_message_id:
         return None
 
@@ -1583,7 +1706,7 @@ def extract_forward(
 
     if not source_link:
 
-        source_link = build_bale_message_link(
+        source_link = resolve_message_link(
             source_username,
             source_chat_id,
             source_message_id
@@ -1603,6 +1726,10 @@ def extract_forward(
         "message_link": source_link
     }
 
+
+# =========================================================
+# SELECT SOURCE
+# =========================================================
 
 def set_selected_source(
     source,
@@ -1665,9 +1792,14 @@ def set_selected_source(
             "\">مشاهده پست مبدأ</a>"
         )
 
+    # =====================================================
+    # دکمه گزارش همین پست
+    # =====================================================
+
     send_message(
         admin_chat_id,
-        text
+        text,
+        source_report_keyboard()
     )
 
 
@@ -1747,6 +1879,18 @@ def save_repost(
 
     try:
 
+        destination_username = clean_username(
+            destination.get(
+                "username"
+            )
+        )
+
+        destination_link = resolve_message_link(
+            destination_username,
+            destination.get("id"),
+            destination_message_id
+        )
+
         data = {
             "source_channel_id": (
                 source.get(
@@ -1772,11 +1916,7 @@ def save_repost(
                 str(destination.get("id"))
             ),
             "destination_username": (
-                clean_username(
-                    destination.get(
-                        "username"
-                    )
-                )
+                destination_username
             ),
             "destination_message_id": (
                 str(destination_message_id)
@@ -1859,7 +1999,7 @@ def get_message_title(
 
 
 # =========================================================
-# ADMIN NOTIFICATION
+# ADMIN IDS
 # =========================================================
 
 def get_admin_ids():
@@ -1963,7 +2103,7 @@ def send_repost_alert(
         "id"
     )
 
-    destination_link = build_bale_message_link(
+    destination_link = resolve_message_link(
         destination_username,
         destination_chat_id,
         destination_message_id
@@ -1975,7 +2115,7 @@ def send_repost_alert(
 
     if not source_link:
 
-        source_link = build_bale_message_link(
+        source_link = resolve_message_link(
             source.get(
                 "username"
             ),
@@ -2070,17 +2210,9 @@ def process_channel_message(
     if chat_id is None:
         return
 
-    # -----------------------------------------------------
-    # ثبت اطلاعات چت
-    # -----------------------------------------------------
-
     auto_register_chat(
         chat
     )
-
-    # -----------------------------------------------------
-    # دریافت رکورد
-    # -----------------------------------------------------
 
     row = get_channel_by_chat_id(
         chat_id
@@ -2088,10 +2220,6 @@ def process_channel_message(
 
     if not row:
         return
-
-    # -----------------------------------------------------
-    # بررسی وضعیت
-    # -----------------------------------------------------
 
     if row.get(
         "active"
@@ -2111,10 +2239,6 @@ def process_channel_message(
 
         return
 
-    # -----------------------------------------------------
-    # مبدأ
-    # -----------------------------------------------------
-
     source = get_selected_source()
 
     if not source.get(
@@ -2129,20 +2253,12 @@ def process_channel_message(
 
         return
 
-    # -----------------------------------------------------
-    # Message ID
-    # -----------------------------------------------------
-
     destination_message_id = message.get(
         "message_id"
     )
 
     if destination_message_id is None:
         return
-
-    # -----------------------------------------------------
-    # Duplicate
-    # -----------------------------------------------------
 
     if repost_exists(
         source.get(
@@ -2231,10 +2347,6 @@ def handle_bot_membership_update(
         bot.get("id")
     )
 
-    # =====================================================
-    # my_chat_member
-    # =====================================================
-
     my_chat_member = update.get(
         "my_chat_member"
     )
@@ -2309,10 +2421,6 @@ def handle_bot_membership_update(
                 )
 
             return True
-
-    # =====================================================
-    # chat_member
-    # =====================================================
 
     chat_member = update.get(
         "chat_member"
@@ -2429,10 +2537,6 @@ def handle_group_service_message(
         bot.get("id")
     )
 
-    # =====================================================
-    # BOT ADDED
-    # =====================================================
-
     new_members = (
         message.get(
             "new_chat_members"
@@ -2505,10 +2609,6 @@ def handle_group_service_message(
 
             return True
 
-    # =====================================================
-    # BOT REMOVED
-    # =====================================================
-
     left_member = message.get(
         "left_chat_member"
     )
@@ -2575,7 +2675,7 @@ def handle_group_service_message(
 
 
 # =========================================================
-# REPORT
+# REPORT FOR SELECTED SOURCE
 # =========================================================
 
 def generate_report():
@@ -2665,7 +2765,11 @@ def generate_report():
         source.get(
             "message_link"
         )
-        or build_bale_message_link(
+    )
+
+    if not source_link:
+
+        source_link = resolve_message_link(
             source.get(
                 "username"
             ),
@@ -2676,10 +2780,16 @@ def generate_report():
                 "message_id"
             )
         )
-    )
+
+        if source_link:
+
+            set_setting(
+                "selected_source_message_link",
+                source_link
+            )
 
     text = (
-        "📊 <b>گزارش بازنشر</b>\n\n"
+        "📊 <b>گزارش همین پست</b>\n\n"
         f"📡 <b>مبدأ:</b> "
         f"{source.get('title') or '-'}\n"
         f"🆔 <b>شناسه پست:</b> "
@@ -2738,7 +2848,12 @@ def generate_report():
             "destination_message_id"
         )
 
-        destination_link = build_bale_message_link(
+        # -------------------------------------------------
+        # اول username ذخیره‌شده
+        # سپس getChat
+        # -------------------------------------------------
+
+        destination_link = resolve_message_link(
             destination_username,
             destination_chat_id,
             destination_message_id
@@ -2782,9 +2897,105 @@ def generate_report():
                 "</a>\n"
             )
 
+        else:
+
+            text += (
+                "   ⚠️ لینک مستقیم این مقصد "
+                "در دسترس نیست.\n"
+            )
+
         text += "\n"
 
     return text
+
+
+# =========================================================
+# DELETE ALL REPORTS
+# =========================================================
+
+def get_reposts_count():
+
+    try:
+
+        result = (
+            supabase
+            .table("reposts")
+            .select("id")
+            .execute()
+        )
+
+        return len(
+            result.data or []
+        )
+
+    except Exception as e:
+
+        print(
+            "GET REPOST COUNT ERROR:",
+            repr(e)
+        )
+
+        return None
+
+
+def delete_all_reports():
+
+    try:
+
+        count = get_reposts_count()
+
+        if count is None:
+
+            return (
+                False,
+                0
+            )
+
+        if count == 0:
+
+            return (
+                True,
+                0
+            )
+
+        # -------------------------------------------------
+        # چون id جدول bigint است،
+        # برای DELETE باید شرط داشته باشیم.
+        # idهای رکوردهای این جدول مثبت هستند.
+        # -------------------------------------------------
+
+        result = (
+            supabase
+            .table("reposts")
+            .delete()
+            .gt(
+                "id",
+                0
+            )
+            .execute()
+        )
+
+        print(
+            "ALL REPORTS DELETED:",
+            count
+        )
+
+        return (
+            True,
+            count
+        )
+
+    except Exception as e:
+
+        print(
+            "DELETE ALL REPORTS ERROR:",
+            repr(e)
+        )
+
+        return (
+            False,
+            0
+        )
 
 
 # =========================================================
@@ -2924,6 +3135,11 @@ def main_keyboard(
                 },
                 {
                     "text": "📈 وضعیت ربات"
+                }
+            ],
+            [
+                {
+                    "text": "🗑️ پاک کردن کلیه گزارش‌ها"
                 }
             ],
             [
@@ -3086,14 +3302,20 @@ def send_help(
             "🔹 <b>انتخاب پست مبدأ</b>\n"
             "یک پست را از کانال مبدأ به صورت "
             "Forward برای ربات ارسال کنید.\n\n"
+            "🔹 <b>گزارش همین پست</b>\n"
+            "بعد از ارسال پست مبدأ، دکمه "
+            "«📊 گزارش همین پست» زیر پیام ظاهر می‌شود.\n\n"
             "🔹 <b>افزودن مقصد</b>\n"
             "از گزینه «➕ افزودن مقصد» استفاده کنید "
             "یا دستور زیر را بفرستید:\n"
             "<code>/addchannel @username</code>\n\n"
             "🔹 <b>حذف مقصد</b>\n"
             "<code>/removechannel @username</code>\n\n"
-            "🔹 <b>گزارش</b>\n"
+            "🔹 <b>گزارش کلی</b>\n"
             "از «📊 گزارش بازنشر» استفاده کنید.\n\n"
+            "🔹 <b>پاک کردن گزارش‌ها</b>\n"
+            "فقط مالک ربات می‌تواند همه گزارش‌های "
+            "قبلی را حذف کند.\n\n"
             "🔹 <b>همگام‌سازی</b>\n"
             "برای بررسی مقصدهای ثبت‌شده از گزینه "
             "«🔄 همگام‌سازی» استفاده کنید.\n\n"
@@ -3354,10 +3576,6 @@ def handle_command(
         else None
     )
 
-    # =====================================================
-    # START
-    # =====================================================
-
     if command.startswith(
         "/start"
     ):
@@ -3368,10 +3586,6 @@ def handle_command(
         )
 
         return True
-
-    # =====================================================
-    # MY ID
-    # =====================================================
 
     if command.startswith(
         "/myid"
@@ -3384,10 +3598,6 @@ def handle_command(
         )
 
         return True
-
-    # =====================================================
-    # CANCEL
-    # =====================================================
 
     if command.startswith(
         "/cancel"
@@ -3408,10 +3618,6 @@ def handle_command(
 
         return True
 
-    # =====================================================
-    # ADMIN CHECK
-    # =====================================================
-
     if not is_admin(
         user_id
     ):
@@ -3422,10 +3628,6 @@ def handle_command(
         )
 
         return True
-
-    # =====================================================
-    # REPORT
-    # =====================================================
 
     if command.startswith(
         "/report"
@@ -3441,10 +3643,6 @@ def handle_command(
 
         return True
 
-    # =====================================================
-    # CHANNELS
-    # =====================================================
-
     if command.startswith(
         "/channels"
     ):
@@ -3458,10 +3656,6 @@ def handle_command(
         )
 
         return True
-
-    # =====================================================
-    # STATUS
-    # =====================================================
 
     if command.startswith(
         "/status"
@@ -3477,9 +3671,32 @@ def handle_command(
 
         return True
 
-    # =====================================================
-    # ADD CHANNEL
-    # =====================================================
+    if command.startswith(
+        "/clearreports"
+    ):
+
+        if not is_owner(
+            user_id
+        ):
+
+            send_message(
+                chat_id,
+                "⛔ فقط مالک ربات می‌تواند "
+                "همه گزارش‌ها را حذف کند."
+            )
+
+            return True
+
+        send_message(
+            chat_id,
+            "⚠️ <b>حذف کلیه گزارش‌ها</b>\n\n"
+            "با تأیید این عملیات، تمام گزارش‌های "
+            "بازنشر قبلی از جدول گزارش‌ها حذف می‌شوند.\n\n"
+            "این عملیات قابل بازگشت نیست.",
+            clear_reports_keyboard()
+        )
+
+        return True
 
     if command.startswith(
         "/addchannel"
@@ -3520,10 +3737,6 @@ def handle_command(
 
         return True
 
-    # =====================================================
-    # REMOVE CHANNEL
-    # =====================================================
-
     if command.startswith(
         "/removechannel"
     ):
@@ -3559,10 +3772,6 @@ def handle_command(
 
         return True
 
-    # =====================================================
-    # SYNC
-    # =====================================================
-
     if command.startswith(
         "/syncchannels"
     ):
@@ -3596,10 +3805,6 @@ def handle_command(
 
         return True
 
-    # =====================================================
-    # ADMINS
-    # =====================================================
-
     if command.startswith(
         "/admins"
     ):
@@ -3622,10 +3827,6 @@ def handle_command(
         )
 
         return True
-
-    # =====================================================
-    # ADD ADMIN
-    # =====================================================
 
     if command.startswith(
         "/addadmin"
@@ -3675,10 +3876,6 @@ def handle_command(
                 )
 
         return True
-
-    # =====================================================
-    # REMOVE ADMIN
-    # =====================================================
 
     if command.startswith(
         "/removeadmin"
@@ -3753,10 +3950,6 @@ def handle_button(
         else None
     )
 
-    # =====================================================
-    # MY ID
-    # =====================================================
-
     if text == "🆔 شناسه من":
 
         send_message(
@@ -3767,10 +3960,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # HELP
-    # =====================================================
-
     if text == "❓ راهنما":
 
         send_help(
@@ -3779,10 +3968,6 @@ def handle_button(
         )
 
         return True
-
-    # =====================================================
-    # ADMIN CHECK
-    # =====================================================
 
     if not is_admin(
         user_id
@@ -3794,10 +3979,6 @@ def handle_button(
         )
 
         return True
-
-    # =====================================================
-    # REPORT
-    # =====================================================
 
     if text == "📊 گزارش بازنشر":
 
@@ -3811,10 +3992,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # CHANNELS
-    # =====================================================
-
     if text == "📡 کانال‌ها و گروه‌ها":
 
         send_message(
@@ -3826,10 +4003,6 @@ def handle_button(
         )
 
         return True
-
-    # =====================================================
-    # ADD
-    # =====================================================
 
     if text == "➕ افزودن مقصد":
 
@@ -3851,10 +4024,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # REMOVE
-    # =====================================================
-
     if text == "➖ حذف مقصد":
 
         PENDING_ACTIONS[
@@ -3869,10 +4038,6 @@ def handle_button(
         )
 
         return True
-
-    # =====================================================
-    # SYNC
-    # =====================================================
 
     if text == "🔄 همگام‌سازی":
 
@@ -3901,10 +4066,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # STATUS
-    # =====================================================
-
     if text == "📈 وضعیت ربات":
 
         send_message(
@@ -3918,8 +4079,33 @@ def handle_button(
         return True
 
     # =====================================================
-    # ADMIN MENU
+    # CLEAR ALL REPORTS
     # =====================================================
+
+    if text == "🗑️ پاک کردن کلیه گزارش‌ها":
+
+        if not is_owner(
+            user_id
+        ):
+
+            send_message(
+                chat_id,
+                "⛔ فقط مالک ربات می‌تواند "
+                "همه گزارش‌ها را حذف کند."
+            )
+
+            return True
+
+        send_message(
+            chat_id,
+            "⚠️ <b>حذف کلیه گزارش‌ها</b>\n\n"
+            "تمام گزارش‌های بازنشر قبلی حذف خواهند شد.\n\n"
+            "❗ این عملیات قابل بازگشت نیست.\n\n"
+            "آیا مطمئن هستید؟",
+            clear_reports_keyboard()
+        )
+
+        return True
 
     if text == "⚙️ مدیریت مدیران":
 
@@ -3943,10 +4129,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # LIST ADMINS
-    # =====================================================
-
     if text == "👥 مدیران ربات":
 
         if not is_owner(
@@ -3967,10 +4149,6 @@ def handle_button(
         )
 
         return True
-
-    # =====================================================
-    # ADD ADMIN
-    # =====================================================
 
     if text == "➕ افزودن مدیر":
 
@@ -3997,10 +4175,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # REMOVE ADMIN
-    # =====================================================
-
     if text == "➖ حذف مدیر":
 
         if not is_owner(
@@ -4026,10 +4200,6 @@ def handle_button(
 
         return True
 
-    # =====================================================
-    # MAIN MENU
-    # =====================================================
-
     if text == "🏠 منوی اصلی":
 
         send_start(
@@ -4040,6 +4210,188 @@ def handle_button(
         return True
 
     return False
+
+
+# =========================================================
+# CALLBACK QUERY HANDLER
+# =========================================================
+
+def process_callback_query(
+    callback_query
+):
+
+    if not callback_query:
+        return
+
+    callback_id = callback_query.get(
+        "id"
+    )
+
+    data = callback_query.get(
+        "data"
+    ) or ""
+
+    from_user = (
+        callback_query.get(
+            "from"
+        )
+        or {}
+    )
+
+    user_id = from_user.get(
+        "id"
+    )
+
+    message = (
+        callback_query.get(
+            "message"
+        )
+        or {}
+    )
+
+    chat = (
+        message.get(
+            "chat"
+        )
+        or {}
+    )
+
+    chat_id = chat.get(
+        "id"
+    )
+
+    # -----------------------------------------------------
+    # پاسخ اولیه به callback
+    # -----------------------------------------------------
+
+    if callback_id:
+
+        try:
+
+            answer_callback_query(
+                callback_id
+            )
+
+        except Exception as e:
+
+            print(
+                "CALLBACK ANSWER ERROR:",
+                repr(e)
+            )
+
+    # -----------------------------------------------------
+    # REPORT SELECTED SOURCE
+    # -----------------------------------------------------
+
+    if data == "report_selected_source":
+
+        if not is_admin(
+            user_id
+        ):
+
+            if callback_id:
+
+                answer_callback_query(
+                    callback_id,
+                    "⛔ شما دسترسی مدیریتی ندارید.",
+                    True
+                )
+
+            return
+
+        if chat_id is None:
+            return
+
+        report = generate_report()
+
+        send_message(
+            chat_id,
+            report,
+            main_keyboard(
+                user_id
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CONFIRM CLEAR REPORTS
+    # -----------------------------------------------------
+
+    if data == "confirm_clear_reports":
+
+        if not is_owner(
+            user_id
+        ):
+
+            if callback_id:
+
+                answer_callback_query(
+                    callback_id,
+                    "⛔ فقط مالک ربات اجازه دارد.",
+                    True
+                )
+
+            return
+
+        ok, count = delete_all_reports()
+
+        if ok:
+
+            if count:
+
+                text = (
+                    "✅ <b>گزارش‌ها پاک شدند.</b>\n\n"
+                    f"🗑 تعداد گزارش‌های حذف‌شده: "
+                    f"<b>{to_persian_digits(count)}</b>\n\n"
+                    "گزارش‌های جدید از این لحظه دوباره "
+                    "ثبت خواهند شد."
+                )
+
+            else:
+
+                text = (
+                    "ℹ️ <b>گزارشی برای حذف وجود نداشت.</b>"
+                )
+
+        else:
+
+            text = (
+                "❌ <b>حذف گزارش‌ها ناموفق بود.</b>\n\n"
+                "لطفاً لاگ ربات را بررسی کنید."
+            )
+
+        send_message(
+            chat_id,
+            text,
+            main_keyboard(
+                user_id
+            )
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # CANCEL CLEAR REPORTS
+    # -----------------------------------------------------
+
+    if data == "cancel_clear_reports":
+
+        if not is_owner(
+            user_id
+        ):
+
+            return
+
+        send_message(
+            chat_id,
+            "❌ عملیات حذف گزارش‌ها لغو شد.",
+            main_keyboard(
+                user_id
+            )
+        )
+
+        return
 
 
 # =========================================================
@@ -4077,10 +4429,6 @@ def handle_pending_action(
         else None
     )
 
-    # -----------------------------------------------------
-    # CANCEL
-    # -----------------------------------------------------
-
     if text.lower() in (
         "/cancel",
         "لغو",
@@ -4101,10 +4449,6 @@ def handle_pending_action(
         )
 
         return True
-
-    # -----------------------------------------------------
-    # ADD CHANNEL
-    # -----------------------------------------------------
 
     if action == "add_channel":
 
@@ -4129,10 +4473,6 @@ def handle_pending_action(
 
         return True
 
-    # -----------------------------------------------------
-    # REMOVE CHANNEL
-    # -----------------------------------------------------
-
     if action == "remove_channel":
 
         PENDING_ACTIONS.pop(
@@ -4155,10 +4495,6 @@ def handle_pending_action(
         )
 
         return True
-
-    # -----------------------------------------------------
-    # ADD ADMIN
-    # -----------------------------------------------------
 
     if action == "add_admin":
 
@@ -4202,10 +4538,6 @@ def handle_pending_action(
             )
 
         return True
-
-    # -----------------------------------------------------
-    # REMOVE ADMIN
-    # -----------------------------------------------------
 
     if action == "remove_admin":
 
@@ -4402,6 +4734,16 @@ def print_update_debug(
             update["channel_post"]
         )
 
+    if "callback_query" in update:
+
+        print(
+            "CALLBACK QUERY:"
+        )
+
+        print(
+            update["callback_query"]
+        )
+
     if "my_chat_member" in update:
 
         print(
@@ -4446,16 +4788,39 @@ def process_update(
     update
 ):
 
-    # -----------------------------------------------------
-    # DEBUG
-    # -----------------------------------------------------
-
     print_update_debug(
         update
     )
 
     # -----------------------------------------------------
-    # Membership events
+    # CALLBACK
+    # -----------------------------------------------------
+
+    callback_query = update.get(
+        "callback_query"
+    )
+
+    if callback_query:
+
+        try:
+
+            process_callback_query(
+                callback_query
+            )
+
+        except Exception as e:
+
+            print(
+                "CALLBACK PROCESS ERROR:",
+                repr(e)
+            )
+
+            traceback.print_exc()
+
+        return
+
+    # -----------------------------------------------------
+    # MEMBERSHIP
     # -----------------------------------------------------
 
     try:
@@ -4483,10 +4848,6 @@ def process_update(
         "message"
     )
 
-    # -----------------------------------------------------
-    # CHANNEL POST
-    # -----------------------------------------------------
-
     if not message:
 
         message = update.get(
@@ -4508,7 +4869,7 @@ def process_update(
     )
 
     # -----------------------------------------------------
-    # GROUP SERVICE EVENTS
+    # GROUP SERVICE
     # -----------------------------------------------------
 
     if chat_type in (
@@ -4546,7 +4907,7 @@ def process_update(
         return
 
     # -----------------------------------------------------
-    # GROUP / SUPERGROUP / CHANNEL
+    # GROUP / CHANNEL
     # -----------------------------------------------------
 
     if chat_type in (
