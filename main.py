@@ -100,6 +100,71 @@ def html_attr(value):
 
 
 # =========================================================
+# MARKDOWN HELPERS
+# =========================================================
+
+def markdown_text(value):
+    """
+    برای Markdown معمولی.
+    کاراکترهای خاص Markdown را تا حد ممکن escape می‌کند.
+    """
+
+    if value is None:
+        return ""
+
+    text = str(value)
+
+    replacements = {
+        "\\": "\\\\",
+        "_": "\\_",
+        "*": "\\*",
+        "[": "\\[",
+        "]": "\\]",
+        "(": "\\(",
+        ")": "\\)",
+        "`": "\\`"
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    return text
+
+
+def markdown_link(label, url, emoji=""):
+    """
+    ساخت لینک قابل کلیک با Markdown.
+    """
+
+    if not url:
+        return ""
+
+    url = str(url).strip()
+
+    if not url:
+        return ""
+
+    # URL را دستکاری نمی‌کنیم تا لینک خراب نشود.
+    return f"{emoji} [{markdown_text(label)}]({url})"
+
+
+def raw_or_markdown_link(label, url, emoji=""):
+    """
+    اگر لینک موجود باشد Markdown Link برمی‌گرداند.
+    در غیر این صورت رشته خالی.
+    """
+
+    if not url:
+        return ""
+
+    return markdown_link(
+        label,
+        url,
+        emoji
+    )
+
+
+# =========================================================
 # JALALI
 # =========================================================
 
@@ -342,6 +407,20 @@ def send_message(
     )
 
 
+def send_markdown_message(
+    chat_id,
+    text,
+    reply_markup=None
+):
+
+    return send_message(
+        chat_id,
+        text,
+        reply_markup,
+        parse_mode="Markdown"
+    )
+
+
 def answer_callback_query(
     callback_query_id,
     text=None,
@@ -419,14 +498,6 @@ def clear_reports_keyboard():
 # =========================================================
 # MESSAGE LINK
 # =========================================================
-#
-# ساختار لینک مورد استفاده:
-#
-# https://ble.ir/USERNAME/CHAT_ID/MESSAGE_ID
-#
-# اگر username در دسترس نباشد، لینک ساخته نمی‌شود
-# تا لینک اشتباه به کاربر نمایش داده نشود.
-# =========================================================
 
 def build_bale_message_link(
     username,
@@ -470,9 +541,9 @@ def resolve_message_link(
 
     username = clean_username(username)
 
-    # -----------------------------------------------
-    # اگر username داریم، مستقیم لینک می‌سازیم
-    # -----------------------------------------------
+    # -----------------------------------------------------
+    # اگر username داریم
+    # -----------------------------------------------------
 
     if username:
 
@@ -482,9 +553,9 @@ def resolve_message_link(
             message_id
         )
 
-    # -----------------------------------------------
-    # اگر username نداریم، از getChat می‌گیریم
-    # -----------------------------------------------
+    # -----------------------------------------------------
+    # اگر username نداریم، از getChat بگیر
+    # -----------------------------------------------------
 
     try:
 
@@ -512,23 +583,6 @@ def resolve_message_link(
         )
 
     return None
-
-
-def make_view_link(
-    label,
-    url,
-    emoji=""
-):
-
-    if not url:
-        return ""
-
-    return (
-        f'{emoji} '
-        f'<a href="{html_attr(url)}">'
-        f'{html_text(label)}'
-        f'</a>'
-    )
 
 
 # =========================================================
@@ -1586,22 +1640,29 @@ def set_selected_source(
         f"<code>{html_text(source.get('message_id') or '-')}</code>"
     )
 
-    if source.get("message_link"):
-
-        text += (
-            "\n\n"
-            + make_view_link(
-                "مشاهده پست مبدأ",
-                source.get("message_link"),
-                "🔵"
-            )
-        )
-
     send_message(
         admin_chat_id,
         text,
         source_report_keyboard()
     )
+
+    # -----------------------------------------------------
+    # لینک را جداگانه با Markdown می‌فرستیم
+    # تا با HTML پیام بالا تداخل نداشته باشد.
+    # -----------------------------------------------------
+
+    if source.get("message_link"):
+
+        link_text = markdown_link(
+            "مشاهده پست مبدأ",
+            source.get("message_link"),
+            "🔵"
+        )
+
+        send_markdown_message(
+            admin_chat_id,
+            link_text
+        )
 
 
 def get_selected_source():
@@ -1717,14 +1778,53 @@ def save_repost(
             "created_at": now_iso()
         }
 
-        result = (
-            supabase
-            .table("reposts")
-            .insert(data)
-            .execute()
-        )
+        # -------------------------------------------------
+        # اگر ستون destination_message_link در دیتابیس
+        # وجود داشته باشد، لینک مقصد را نیز ذخیره می‌کنیم.
+        #
+        # اگر ستون وجود نداشته باشد، INSERT خطا می‌دهد.
+        # بنابراین ابتدا تلاش می‌کنیم با ستون لینک ذخیره کنیم.
+        # -------------------------------------------------
 
-        return bool(result.data)
+        if destination_link:
+            data["destination_message_link"] = destination_link
+
+        try:
+
+            result = (
+                supabase
+                .table("reposts")
+                .insert(data)
+                .execute()
+            )
+
+            return bool(result.data)
+
+        except Exception as first_error:
+
+            # ---------------------------------------------
+            # سازگاری با دیتابیس قدیمی که ستون
+            # destination_message_link ندارد.
+            # ---------------------------------------------
+
+            print(
+                "SAVE REPOST WITH LINK ERROR:",
+                repr(first_error)
+            )
+
+            data.pop(
+                "destination_message_link",
+                None
+            )
+
+            result = (
+                supabase
+                .table("reposts")
+                .insert(data)
+                .execute()
+            )
+
+            return bool(result.data)
 
     except Exception as e:
 
@@ -1874,6 +1974,10 @@ def send_repost_alert(
 
     title = get_message_title(message)
 
+    # -----------------------------------------------------
+    # پیام اصلی گزارش با HTML
+    # -----------------------------------------------------
+
     text = (
         "🔔 <b>بازنشر جدید شناسایی شد</b>\n\n"
         f"📡 <b>مقصد:</b> "
@@ -1894,44 +1998,70 @@ def send_repost_alert(
         f"{format_iran_datetime(now_iso())}"
     )
 
-    # =====================================================
-    # لینک پست مبدأ
-    # =====================================================
+    # -----------------------------------------------------
+    # پیام اصلی
+    # -----------------------------------------------------
+
+    notify_admins(text)
+
+    # -----------------------------------------------------
+    # لینک مبدأ
+    # -----------------------------------------------------
 
     if source_link:
 
-        text += (
-            "\n\n"
-            + make_view_link(
-                "مشاهده پست مبدأ",
-                source_link,
-                "🔵"
-            )
+        source_link_text = markdown_link(
+            "مشاهده پست مبدأ",
+            source_link,
+            "🔵"
         )
 
-    # =====================================================
-    # لینک پست مقصد
-    # =====================================================
+        notify_admins_markdown(
+            source_link_text
+        )
+
+    # -----------------------------------------------------
+    # لینک مقصد
+    # -----------------------------------------------------
 
     if destination_link:
 
-        text += (
-            "\n"
-            + make_view_link(
-                "مشاهده پست مقصد",
-                destination_link,
-                "🟢"
-            )
+        destination_link_text = markdown_link(
+            "مشاهده پست مقصد",
+            destination_link,
+            "🟢"
+        )
+
+        notify_admins_markdown(
+            destination_link_text
         )
 
     else:
 
-        text += (
-            "\n"
+        notify_admins(
             "🟢 ⚠️ لینک مستقیم پست مقصد در دسترس نیست."
         )
 
-    notify_admins(text)
+
+def notify_admins_markdown(text):
+
+    for admin_id in get_admin_ids():
+
+        try:
+
+            send_markdown_message(
+                admin_id,
+                text
+            )
+
+            time.sleep(0.1)
+
+        except Exception as e:
+
+            print(
+                "NOTIFY MARKDOWN ERROR:",
+                repr(e)
+            )
 
 
 # =========================================================
@@ -2430,12 +2560,8 @@ def generate_report():
 
         text += (
             "\n"
-            + make_view_link(
-                "مشاهده پست مبدأ",
-                source_link,
-                "🔵"
-            )
-            + "\n"
+            "🔵 <b>مشاهده پست مبدأ:</b>\n"
+            f"<code>{html_text(source_link)}</code>\n"
         )
 
     else:
@@ -2455,15 +2581,12 @@ def generate_report():
 
     if not rows:
 
-        text += (
-            "\n\n"
-            "ℹ️ هنوز بازنشری از این پست "
+        return text + (
+            "\nℹ️ هنوز بازنشری از این پست "
             "در مقصدهای فعال ثبت نشده است."
         )
 
-        return text
-
-    text += "\n\n"
+    text += "\n"
 
     # =====================================================
     # DESTINATIONS
@@ -2492,14 +2615,25 @@ def generate_report():
         )
 
         # -------------------------------------------------
-        # ساخت لینک واقعی مقصد
+        # اول لینک ذخیره‌شده را بررسی می‌کنیم
         # -------------------------------------------------
 
-        destination_link = resolve_message_link(
-            destination_username,
-            destination_chat_id,
-            destination_message_id
+        destination_link = (
+            row.get("destination_message_link")
+            or ""
         )
+
+        # -------------------------------------------------
+        # اگر لینک ذخیره‌شده نداریم، دوباره بساز
+        # -------------------------------------------------
+
+        if not destination_link:
+
+            destination_link = resolve_message_link(
+                destination_username,
+                destination_chat_id,
+                destination_message_id
+            )
 
         message_title = (
             row.get("message_title")
@@ -2527,14 +2661,257 @@ def generate_report():
         )
 
         # -------------------------------------------------
-        # لینک پست مقصد
+        # لینک مقصد
         # -------------------------------------------------
 
         if destination_link:
 
             text += (
+                f"   🟢 <b>مشاهده پست مقصد:</b>\n"
+                f"   <code>{html_text(destination_link)}</code>\n"
+            )
+
+        else:
+
+            text += (
+                "   🟢 ⚠️ لینک مستقیم مقصد در دسترس نیست.\n"
+            )
+
+        text += "\n"
+
+    return text
+
+
+def generate_report_markdown():
+
+    """
+    نسخه Markdown گزارش.
+    برای اینکه لینک‌ها واقعاً به صورت
+    [مشاهده پست](URL)
+    نمایش داده شوند.
+    """
+
+    source = get_selected_source()
+
+    if not source.get("channel_id"):
+
+        return (
+            "📊 *گزارش بازنشر*\n\n"
+            "⚠️ هنوز پست مبدأ انتخاب نشده است.\n\n"
+            "یک پست را از کانال مبدأ برای ربات "
+            "Forward کنید."
+        )
+
+    source_channel_id = str(
+        source.get("channel_id")
+    )
+
+    source_message_id = str(
+        source.get("message_id")
+    )
+
+    try:
+
+        result = (
+            supabase
+            .table("reposts")
+            .select("*")
+            .eq(
+                "source_channel_id",
+                source_channel_id
+            )
+            .eq(
+                "source_message_id",
+                source_message_id
+            )
+            .order(
+                "created_at",
+                desc=True
+            )
+            .execute()
+        )
+
+        rows = result.data or []
+
+    except Exception as e:
+
+        print(
+            "REPORT MARKDOWN FETCH ERROR:",
+            repr(e)
+        )
+
+        return "❌ خطا در دریافت گزارش."
+
+    # -----------------------------------------------------
+    # فقط مقصدهای فعال
+    # -----------------------------------------------------
+
+    active_channels = get_active_channels()
+
+    active_ids = {
+        str(row.get("chat_id"))
+        for row in active_channels
+        if row.get("chat_id")
+    }
+
+    rows = [
+        row
+        for row in rows
+        if str(
+            row.get("destination_channel_id")
+        ) in active_ids
+    ]
+
+    # =====================================================
+    # SOURCE LINK
+    # =====================================================
+
+    source_link = source.get(
+        "message_link"
+    )
+
+    if not source_link:
+
+        source_link = resolve_message_link(
+            source.get("username"),
+            source.get("channel_id"),
+            source.get("message_id")
+        )
+
+        if source_link:
+
+            set_setting(
+                "selected_source_message_link",
+                source_link
+            )
+
+    # =====================================================
+    # HEADER
+    # =====================================================
+
+    text = (
+        "📊 *گزارش همین پست*\n\n"
+        f"📡 *مبدأ:* "
+        f"{markdown_text(source.get('title') or '-')}\n"
+        f"🆔 *شناسه پست:* "
+        f"`{markdown_text(source_message_id)}`\n"
+    )
+
+    if source_link:
+
+        text += (
+            "\n"
+            + markdown_link(
+                "مشاهده پست مبدأ",
+                source_link,
+                "🔵"
+            )
+            + "\n"
+        )
+
+    else:
+
+        text += (
+            "\n🔵 ⚠️ لینک پست مبدأ در دسترس نیست.\n"
+        )
+
+    # =====================================================
+    # COUNT
+    # =====================================================
+
+    text += (
+        f"\n📈 *تعداد بازنشر فعال:* "
+        f"{to_persian_digits(len(rows))}\n"
+    )
+
+    if not rows:
+
+        text += (
+            "\nℹ️ هنوز بازنشری از این پست "
+            "در مقصدهای فعال ثبت نشده است."
+        )
+
+        return text
+
+    text += "\n"
+
+    # =====================================================
+    # DESTINATIONS
+    # =====================================================
+
+    for index, row in enumerate(
+        rows,
+        start=1
+    ):
+
+        destination_title = (
+            row.get("destination_title")
+            or "-"
+        )
+
+        destination_username = clean_username(
+            row.get("destination_username")
+        )
+
+        destination_chat_id = row.get(
+            "destination_channel_id"
+        )
+
+        destination_message_id = row.get(
+            "destination_message_id"
+        )
+
+        # -------------------------------------------------
+        # لینک ذخیره‌شده
+        # -------------------------------------------------
+
+        destination_link = (
+            row.get("destination_message_link")
+            or ""
+        )
+
+        # -------------------------------------------------
+        # اگر موجود نبود، دوباره بساز
+        # -------------------------------------------------
+
+        if not destination_link:
+
+            destination_link = resolve_message_link(
+                destination_username,
+                destination_chat_id,
+                destination_message_id
+            )
+
+        message_title = (
+            row.get("message_title")
+            or "بدون عنوان"
+        )
+
+        created_at = format_iran_datetime(
+            row.get("created_at")
+        )
+
+        text += (
+            f"*{to_persian_digits(index)}.* "
+            f"📡 {markdown_text(destination_title)}\n"
+        )
+
+        if destination_username:
+
+            text += (
+                f"   🔖 @{markdown_text(destination_username)}\n"
+            )
+
+        text += (
+            f"   📝 {markdown_text(message_title)}\n"
+            f"   🕐 {markdown_text(created_at)}\n"
+        )
+
+        if destination_link:
+
+            text += (
                 "   "
-                + make_view_link(
+                + markdown_link(
                     "مشاهده پست مقصد",
                     destination_link,
                     "🟢"
@@ -3136,9 +3513,9 @@ def handle_command(
 
     if command.startswith("/report"):
 
-        send_message(
+        send_markdown_message(
             chat_id,
-            generate_report(),
+            generate_report_markdown(),
             main_keyboard(user_id)
         )
 
@@ -3437,9 +3814,9 @@ def handle_button(
 
     if text == "📊 گزارش بازنشر":
 
-        send_message(
+        send_markdown_message(
             chat_id,
-            generate_report(),
+            generate_report_markdown(),
             main_keyboard(user_id)
         )
 
@@ -3524,10 +3901,6 @@ def handle_button(
         )
 
         return True
-
-    # =====================================================
-    # CLEAR ALL REPORTS
-    # =====================================================
 
     if text == "🗑️ پاک کردن کلیه گزارش‌ها":
 
@@ -3724,9 +4097,9 @@ def process_callback_query(callback_query):
         if chat_id is None:
             return
 
-        send_message(
+        send_markdown_message(
             chat_id,
-            generate_report(),
+            generate_report_markdown(),
             main_keyboard(user_id)
         )
 
@@ -4020,11 +4393,6 @@ def process_private_message(message):
 
     # -----------------------------------------------------
     # PENDING ACTION
-    #
-    # مهم:
-    # ابتدا pending بررسی می‌شود تا وقتی کاربر در حال
-    # افزودن مقصد/مدیر است، پیام او اشتباهاً به عنوان
-    # دکمه پردازش نشود.
     # -----------------------------------------------------
 
     if handle_pending_action(
