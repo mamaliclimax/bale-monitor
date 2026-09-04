@@ -53,7 +53,10 @@ def bale(method, data=None):
 
         result = response.json()
 
-        print("BALE:", method, result)
+        print("\n========== BALE API ==========")
+        print("METHOD:", method)
+        print("RESULT:", result)
+        print("==============================\n")
 
         return result
 
@@ -83,7 +86,7 @@ def send_message(chat_id, text):
 
 
 # =========================================================
-# PERSIAN DATE
+# DATE
 # =========================================================
 
 def gregorian_to_jalali(gy, gm, gd):
@@ -157,25 +160,29 @@ def gregorian_to_jalali(gy, gm, gd):
     return jy, jm, jd
 
 
-def to_shamsi(dt):
+def to_shamsi(value):
 
-    if not dt:
+    if not value:
         return ""
 
     try:
 
-        if isinstance(dt, str):
+        if isinstance(value, str):
 
-            dt = dt.replace(
+            value = value.replace(
                 "Z",
                 "+00:00"
             )
 
             dt = datetime.fromisoformat(
-                dt
+                value
             )
 
-        if dt.tzinfo is not None:
+        else:
+
+            dt = value
+
+        if dt.tzinfo:
 
             dt = dt.astimezone(
                 timezone.utc
@@ -203,20 +210,18 @@ def to_shamsi(dt):
     except Exception as e:
 
         print(
-            "SHAMSI ERROR:",
+            "DATE ERROR:",
             e
         )
 
-        return str(dt)
+        return str(value)
 
 
 def now_shamsi():
 
-    now = datetime.now(
-        timezone.utc
+    return to_shamsi(
+        datetime.now(timezone.utc)
     )
-
-    return to_shamsi(now)
 
 
 # =========================================================
@@ -373,7 +378,6 @@ def clean_username(username):
 
         username = username[1:]
 
-    # لینک‌های c/ را username فرض نکن
     if username.startswith("c/"):
 
         return None
@@ -388,7 +392,7 @@ def clean_username(username):
 
 
 # =========================================================
-# BLE MESSAGE LINK
+# BLE LINK
 # =========================================================
 
 def normalize_ble_link(link):
@@ -406,9 +410,6 @@ def normalize_ble_link(link):
             ".,،)]}>\"'"
         )
 
-        # مثال:
-        # https://ble.ir/channel/123
-
         match = re.search(
             r"https?://(?:www\.)?ble\.ir/[A-Za-z0-9_]+/\d+",
             link
@@ -417,9 +418,6 @@ def normalize_ble_link(link):
         if match:
 
             return match.group(0)
-
-        # مثال:
-        # https://ble.ir/c/123456/789
 
         match = re.search(
             r"https?://(?:www\.)?ble\.ir/c/\d+/\d+",
@@ -433,7 +431,7 @@ def normalize_ble_link(link):
     except Exception as e:
 
         print(
-            "NORMALIZE LINK ERROR:",
+            "LINK ERROR:",
             e
         )
 
@@ -449,7 +447,7 @@ def extract_message_link(message):
 
         return None
 
-    possible_fields = [
+    fields = [
         "link",
         "url",
         "message_link",
@@ -457,7 +455,7 @@ def extract_message_link(message):
         "permalink"
     ]
 
-    for field in possible_fields:
+    for field in fields:
 
         value = message.get(
             field
@@ -513,6 +511,10 @@ def extract_message_link(message):
 
 def get_chat(identifier):
 
+    if not identifier:
+
+        return None
+
     try:
 
         result = bale(
@@ -524,9 +526,21 @@ def get_chat(identifier):
 
         if result.get("ok"):
 
-            return result.get(
+            chat = result.get(
                 "result"
             )
+
+            print(
+                "GET CHAT SUCCESS:",
+                chat
+            )
+
+            return chat
+
+        print(
+            "GET CHAT FAILED:",
+            result
+        )
 
     except Exception as e:
 
@@ -584,7 +598,12 @@ def save_source(chat):
     )
 
     title = (
-        chat.get("title")
+        chat.get(
+            "title"
+        )
+        or chat.get(
+            "first_name"
+        )
         or username
         or "کانال مرجع"
     )
@@ -612,17 +631,30 @@ def save_source(chat):
 
 
 # =========================================================
-# CHANNEL DATABASE
+# CHANNEL ID
 # =========================================================
 
 def channel_db_id(username):
 
+    return hashlib_sha256(
+        username.lower()
+    )[:32]
+
+
+def hashlib_sha256(text):
+
+    import hashlib
+
     return hashlib.sha256(
-        username.lower().encode(
+        text.encode(
             "utf-8"
         )
-    ).hexdigest()[:32]
+    ).hexdigest()
 
+
+# =========================================================
+# ADD CHANNEL
+# =========================================================
 
 def add_channel(username):
 
@@ -639,7 +671,6 @@ def add_channel(username):
 
     try:
 
-        # بررسی وجود قبلی
         existing = (
             supabase
             .table("channels")
@@ -652,17 +683,38 @@ def add_channel(username):
             .execute()
         )
 
+        # -------------------------------------------------
         # کانال قبلاً وجود دارد
+        # -------------------------------------------------
+
         if existing.data:
+
+            chat = get_chat(
+                "@" + username
+            )
+
+            update_data = {
+                "active": True
+            }
+
+            if chat:
+
+                if chat.get("id"):
+
+                    update_data["chat_id"] = str(
+                        chat.get("id")
+                    )
+
+                if chat.get("title"):
+
+                    update_data["title"] = (
+                        chat.get("title")
+                    )
 
             (
                 supabase
                 .table("channels")
-                .update(
-                    {
-                        "active": True
-                    }
-                )
+                .update(update_data)
                 .eq(
                     "username",
                     username
@@ -675,7 +727,10 @@ def add_channel(username):
                 "کانال دوباره فعال شد."
             )
 
-        # محدودیت 100 کانال
+        # -------------------------------------------------
+        # محدودیت
+        # -------------------------------------------------
+
         active = (
             supabase
             .table("channels")
@@ -696,7 +751,10 @@ def add_channel(username):
                 "❌ حداکثر ۱۰۰ کانال قابل مانیتور است."
             )
 
+        # -------------------------------------------------
         # دریافت اطلاعات کانال
+        # -------------------------------------------------
+
         chat = get_chat(
             "@" + username
         )
@@ -713,9 +771,15 @@ def add_channel(username):
         )
 
         title = (
-            chat.get("title")
+            chat.get(
+                "title"
+            )
             or username
         )
+
+        # -------------------------------------------------
+        # ذخیره
+        # -------------------------------------------------
 
         data = {
             "id": channel_db_id(
@@ -726,8 +790,6 @@ def add_channel(username):
             "active": True
         }
 
-        # بسیار مهم:
-        # ذخیره شناسه واقعی کانال
         if chat_id:
 
             data["chat_id"] = str(
@@ -742,7 +804,7 @@ def add_channel(username):
         )
 
         print(
-            "CHANNEL ADDED:",
+            "CHANNEL SAVED:",
             data
         )
 
@@ -763,6 +825,10 @@ def add_channel(username):
             f"❌ خطا در افزودن کانال:\n{e}"
         )
 
+
+# =========================================================
+# REMOVE CHANNEL
+# =========================================================
 
 def remove_channel(username):
 
@@ -796,12 +862,16 @@ def remove_channel(username):
     except Exception as e:
 
         print(
-            "REMOVE CHANNEL ERROR:",
+            "REMOVE ERROR:",
             e
         )
 
         return False
 
+
+# =========================================================
+# GET CHANNELS
+# =========================================================
 
 def get_channels():
 
@@ -814,9 +884,6 @@ def get_channels():
             .eq(
                 "active",
                 True
-            )
-            .order(
-                "title"
             )
             .limit(100)
             .execute()
@@ -833,6 +900,10 @@ def get_channels():
 
         return []
 
+
+# =========================================================
+# FIND CHANNEL BY USERNAME
+# =========================================================
 
 def get_channel_by_username(
     username
@@ -871,12 +942,16 @@ def get_channel_by_username(
     except Exception as e:
 
         print(
-            "GET CHANNEL BY USERNAME ERROR:",
+            "CHANNEL USERNAME ERROR:",
             e
         )
 
     return None
 
+
+# =========================================================
+# FIND CHANNEL BY CHAT ID
+# =========================================================
 
 def get_channel_by_chat_id(
     chat_id
@@ -911,20 +986,44 @@ def get_channel_by_chat_id(
     except Exception as e:
 
         print(
-            "GET CHANNEL BY CHAT ID ERROR:",
+            "CHANNEL CHAT ID ERROR:",
             e
         )
 
     return None
 
 
-def get_destination_channel(
+# =========================================================
+# FIND DESTINATION CHANNEL
+# =========================================================
+
+def resolve_destination_channel(
     chat
 ):
 
     if not chat:
 
         return None
+
+    print(
+        "\n========================================"
+    )
+
+    print(
+        "RESOLVING DESTINATION CHANNEL"
+    )
+
+    print(
+        "RAW CHAT:"
+    )
+
+    print(
+        chat
+    )
+
+    print(
+        "========================================"
+    )
 
     chat_id = chat.get(
         "id"
@@ -936,7 +1035,34 @@ def get_destination_channel(
         )
     )
 
-    # اول با chat_id
+    title = (
+        chat.get(
+            "title"
+        )
+        or chat.get(
+            "first_name"
+        )
+    )
+
+    print(
+        "CHAT ID:",
+        chat_id
+    )
+
+    print(
+        "CHAT USERNAME:",
+        username
+    )
+
+    print(
+        "CHAT TITLE:",
+        title
+    )
+
+    # -----------------------------------------------------
+    # روش اول: chat_id
+    # -----------------------------------------------------
+
     if chat_id:
 
         channel = get_channel_by_chat_id(
@@ -945,9 +1071,20 @@ def get_destination_channel(
 
         if channel:
 
-            return channel
+            print(
+                "FOUND BY CHAT ID:",
+                channel
+            )
 
-    # سپس با username
+            return complete_destination(
+                channel,
+                chat
+            )
+
+    # -----------------------------------------------------
+    # روش دوم: username
+    # -----------------------------------------------------
+
     if username:
 
         channel = get_channel_by_username(
@@ -956,15 +1093,25 @@ def get_destination_channel(
 
         if channel:
 
-            return channel
+            print(
+                "FOUND BY USERNAME:",
+                channel
+            )
 
-    # آخرین تلاش:
-    # جستجو بین کانال‌های فعال
+            return complete_destination(
+                channel,
+                chat
+            )
+
+    # -----------------------------------------------------
+    # روش سوم: مقایسه دستی
+    # -----------------------------------------------------
+
     channels = get_channels()
 
     for channel in channels:
 
-        saved_chat_id = channel.get(
+        saved_id = channel.get(
             "chat_id"
         )
 
@@ -976,12 +1123,20 @@ def get_destination_channel(
 
         if (
             chat_id
-            and saved_chat_id
-            and str(chat_id)
-            == str(saved_chat_id)
+            and saved_id
+            and str(saved_id)
+            == str(chat_id)
         ):
 
-            return channel
+            print(
+                "FOUND MANUALLY BY CHAT ID:",
+                channel
+            )
+
+            return complete_destination(
+                channel,
+                chat
+            )
 
         if (
             username
@@ -990,24 +1145,215 @@ def get_destination_channel(
             == saved_username.lower()
         ):
 
-            return channel
+            print(
+                "FOUND MANUALLY BY USERNAME:",
+                channel
+            )
+
+            return complete_destination(
+                channel,
+                chat
+            )
+
+    # -----------------------------------------------------
+    # روش چهارم:
+    # getChat مستقیم
+    # -----------------------------------------------------
+
+    if chat_id:
+
+        fresh_chat = get_chat(
+            chat_id
+        )
+
+        if fresh_chat:
+
+            fresh_username = clean_username(
+                fresh_chat.get(
+                    "username"
+                )
+            )
+
+            fresh_title = (
+                fresh_chat.get(
+                    "title"
+                )
+                or fresh_chat.get(
+                    "first_name"
+                )
+            )
+
+            print(
+                "FRESH CHAT:",
+                fresh_chat
+            )
+
+            if fresh_username:
+
+                channel = get_channel_by_username(
+                    fresh_username
+                )
+
+                if channel:
+
+                    return complete_destination(
+                        channel,
+                        fresh_chat
+                    )
+
+            # اگر کانال در DB با username نبود
+            # اما chat_id آن برابر بود
+            channel = get_channel_by_chat_id(
+                chat_id
+            )
+
+            if channel:
+
+                return complete_destination(
+                    channel,
+                    fresh_chat
+                )
+
+    # -----------------------------------------------------
+    # هیچ تطبیقی پیدا نشد
+    # -----------------------------------------------------
+
+    print(
+        "\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    )
+
+    print(
+        "DESTINATION CHANNEL NOT RESOLVED"
+    )
+
+    print(
+        "RAW CHAT:",
+        chat
+    )
+
+    print(
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+    )
 
     return None
+
+
+# =========================================================
+# COMPLETE DESTINATION
+# =========================================================
+
+def complete_destination(
+    channel,
+    chat
+):
+
+    if channel is None:
+
+        channel = {}
+
+    chat = chat or {}
+
+    chat_id = (
+        chat.get("id")
+        or channel.get("chat_id")
+    )
+
+    username = (
+        clean_username(
+            chat.get("username")
+        )
+        or clean_username(
+            channel.get("username")
+        )
+    )
+
+    title = (
+        chat.get("title")
+        or chat.get("first_name")
+        or channel.get("title")
+        or username
+        or "کانال مقصد"
+    )
+
+    # -----------------------------------------------------
+    # اگر عنوان پیدا شد، DB را هم به‌روز کن
+    # -----------------------------------------------------
+
+    if channel.get("username"):
+
+        update_data = {}
+
+        if chat_id:
+
+            update_data["chat_id"] = str(
+                chat_id
+            )
+
+        if username:
+
+            update_data["username"] = username
+
+        if title:
+
+            update_data["title"] = title
+
+        if update_data:
+
+            try:
+
+                (
+                    supabase
+                    .table("channels")
+                    .update(update_data)
+                    .eq(
+                        "username",
+                        channel.get(
+                            "username"
+                        )
+                    )
+                    .execute()
+                )
+
+            except Exception as e:
+
+                print(
+                    "UPDATE CHANNEL INFO ERROR:",
+                    e
+                )
+
+    result = {
+        "id": chat_id,
+        "chat_id": chat_id,
+        "username": username,
+        "title": title
+    }
+
+    print(
+        "\nDESTINATION FINAL:"
+    )
+
+    print(
+        result
+    )
+
+    return result
 
 
 # =========================================================
 # FORWARD EXTRACTION
 # =========================================================
 
-def extract_forward(message):
+def extract_forward(
+    message
+):
 
     forward_chat_id = None
     forward_username = None
     forward_message_id = None
 
-    # ---------------------------------------------
-    # ساختار قدیمی
-    # ---------------------------------------------
+    # -----------------------------------------------------
+    # قدیمی
+    # -----------------------------------------------------
 
     forward_from_chat = message.get(
         "forward_from_chat"
@@ -1033,9 +1379,9 @@ def extract_forward(message):
             )
         )
 
-    # ---------------------------------------------
-    # ساختار جدید
-    # ---------------------------------------------
+    # -----------------------------------------------------
+    # جدید
+    # -----------------------------------------------------
 
     forward_origin = message.get(
         "forward_origin"
@@ -1044,26 +1390,30 @@ def extract_forward(message):
     if forward_origin:
 
         if (
-            forward_origin.get("type")
+            forward_origin.get(
+                "type"
+            )
             == "channel"
         ):
 
-            chat = forward_origin.get(
-                "chat",
-                {}
+            forward_chat = (
+                forward_origin.get(
+                    "chat",
+                    {}
+                )
             )
 
-            if chat:
+            if forward_chat:
 
                 forward_chat_id = (
-                    chat.get(
+                    forward_chat.get(
                         "id",
                         forward_chat_id
                     )
                 )
 
                 forward_username = (
-                    chat.get(
+                    forward_chat.get(
                         "username",
                         forward_username
                     )
@@ -1076,7 +1426,7 @@ def extract_forward(message):
                 )
             )
 
-    return {
+    result = {
         "chat_id": forward_chat_id,
         "username": (
             clean_username(
@@ -1087,6 +1437,13 @@ def extract_forward(message):
         ),
         "message_id": forward_message_id
     }
+
+    print(
+        "EXTRACTED FORWARD:",
+        result
+    )
+
+    return result
 
 
 # =========================================================
@@ -1154,7 +1511,6 @@ def make_source_link(
 ):
 
     if not source:
-
         return None
 
     username = clean_username(
@@ -1164,11 +1520,9 @@ def make_source_link(
     )
 
     if not username:
-
         return None
 
     if not source_message_id:
-
         return None
 
     return (
@@ -1191,8 +1545,12 @@ def get_message_title(
         return "بدون عنوان"
 
     text = (
-        message.get("text")
-        or message.get("caption")
+        message.get(
+            "text"
+        )
+        or message.get(
+            "caption"
+        )
         or ""
     )
 
@@ -1232,11 +1590,9 @@ def save_repost(
 ):
 
     if not source_message_id:
-
         return False
 
     if not destination:
-
         return False
 
     destination_username = clean_username(
@@ -1264,7 +1620,6 @@ def save_repost(
 
     try:
 
-        # بررسی تکراری نبودن
         query = (
             supabase
             .table("reposts")
@@ -1348,7 +1703,7 @@ def save_repost(
                 ).isoformat()
         }
 
-        (
+        result = (
             supabase
             .table("reposts")
             .insert(data)
@@ -1356,8 +1711,24 @@ def save_repost(
         )
 
         print(
-            "REPOST SAVED:",
+            "========================================"
+        )
+
+        print(
+            "REPOST SAVED:"
+        )
+
+        print(
             data
+        )
+
+        print(
+            "SUPABASE RESULT:",
+            result.data
+        )
+
+        print(
+            "========================================"
         )
 
         return True
@@ -1373,25 +1744,19 @@ def save_repost(
 
 
 # =========================================================
-# REPOST ALERT
+# ALERT
 # =========================================================
 
 def send_repost_alert(
     source,
     destination,
     message_title,
-    destination_message_id,
     source_message_id
 ):
 
     if OWNER_ID is None:
 
         return
-
-    source_link = make_source_link(
-        source,
-        source_message_id
-    )
 
     destination_title = (
         destination.get(
@@ -1404,6 +1769,11 @@ def send_repost_alert(
         destination.get(
             "username"
         )
+    )
+
+    source_link = make_source_link(
+        source,
+        source_message_id
     )
 
     text = (
@@ -1445,6 +1815,23 @@ def process_channel_message(
     message
 ):
 
+    print(
+        "\n\n"
+        "################################################"
+    )
+
+    print(
+        "RAW CHANNEL MESSAGE"
+    )
+
+    print(
+        message
+    )
+
+    print(
+        "################################################"
+    )
+
     chat = message.get(
         "chat",
         {}
@@ -1452,115 +1839,57 @@ def process_channel_message(
 
     if not chat:
 
+        print(
+            "NO DESTINATION CHAT"
+        )
+
         return
 
-    print(
-        "CHANNEL MESSAGE CHAT:",
-        chat
-    )
-
     # -----------------------------------------------------
-    # پیدا کردن کانال مقصد
+    # مقصد
     # -----------------------------------------------------
 
-    destination = get_destination_channel(
+    destination = resolve_destination_channel(
         chat
     )
 
     if not destination:
 
         print(
-            "CHANNEL NOT MONITORED:",
-            chat
+            "❌ DESTINATION CHANNEL NOT FOUND"
         )
 
         return
 
     # -----------------------------------------------------
-    # تکمیل اطلاعات مقصد
-    # -----------------------------------------------------
-
-    destination_chat_id = chat.get(
-        "id"
-    )
-
-    destination_username = (
-        clean_username(
-            chat.get(
-                "username"
-            )
-        )
-        or clean_username(
-            destination.get(
-                "username"
-            )
-        )
-    )
-
-    destination_title = (
-        destination.get(
-            "title"
-        )
-        or chat.get(
-            "title"
-        )
-        or chat.get(
-            "first_name"
-        )
-        or destination_username
-        or "کانال مقصد"
-    )
-
-    destination["chat_id"] = (
-        destination_chat_id
-        or destination.get(
-            "chat_id"
-        )
-    )
-
-    destination["username"] = (
-        destination_username
-    )
-
-    destination["title"] = (
-        destination_title
-    )
-
-    print(
-        "DESTINATION FOUND:",
-        destination_title,
-        destination_username,
-        destination.get(
-            "chat_id"
-        )
-    )
-
-    # -----------------------------------------------------
-    # بررسی فوروارد
+    # فوروارد
     # -----------------------------------------------------
 
     forward = extract_forward(
         message
     )
 
-    print(
-        "FORWARD:",
-        forward
-    )
-
     if not forward.get(
         "message_id"
     ):
 
+        print(
+            "MESSAGE IS NOT A FORWARD"
+        )
+
         return
 
     # -----------------------------------------------------
-    # آیا از کانال مرجع است؟
+    # بررسی مرجع
     # -----------------------------------------------------
 
     if not is_from_source(
         forward
     ):
+
+        print(
+            "FORWARD IS NOT FROM SOURCE"
+        )
 
         return
 
@@ -1568,11 +1897,11 @@ def process_channel_message(
 
     if not source:
 
-        return
+        print(
+            "SOURCE NOT CONFIGURED"
+        )
 
-    # -----------------------------------------------------
-    # شناسه پیام مرجع
-    # -----------------------------------------------------
+        return
 
     source_message_id = (
         forward.get(
@@ -1580,26 +1909,18 @@ def process_channel_message(
         )
     )
 
-    # -----------------------------------------------------
-    # شناسه پیام مقصد
-    # -----------------------------------------------------
-
     destination_message_id = (
         message.get(
             "message_id"
         )
     )
 
-    # -----------------------------------------------------
-    # عنوان پیام
-    # -----------------------------------------------------
-
     message_title = get_message_title(
         message
     )
 
     # -----------------------------------------------------
-    # ثبت بازنشر
+    # ذخیره
     # -----------------------------------------------------
 
     saved = save_repost(
@@ -1610,23 +1931,22 @@ def process_channel_message(
         message_title=message_title
     )
 
-    # -----------------------------------------------------
-    # هشدار
-    # -----------------------------------------------------
-
     if saved:
 
         send_repost_alert(
             source=source,
             destination=destination,
             message_title=message_title,
-            destination_message_id=destination_message_id,
             source_message_id=source_message_id
         )
 
+    print(
+        "CHANNEL MESSAGE PROCESS FINISHED"
+    )
+
 
 # =========================================================
-# PRIVATE SOURCE FORWARD
+# PRIVATE FORWARD
 # =========================================================
 
 def process_private_forward(
@@ -1652,17 +1972,8 @@ def process_private_forward(
 
         return
 
-    # -----------------------------------------------------
-    # استخراج فوروارد
-    # -----------------------------------------------------
-
     forward = extract_forward(
         message
-    )
-
-    print(
-        "PRIVATE FORWARD:",
-        forward
     )
 
     if not forward.get(
@@ -1671,14 +1982,10 @@ def process_private_forward(
 
         send_message(
             chat_id,
-            "⚠️ این پیام، پست فورواردشده قابل شناسایی نیست."
+            "⚠️ پست فورواردشده قابل شناسایی نیست."
         )
 
         return
-
-    # -----------------------------------------------------
-    # بررسی اینکه از کانال مرجع باشد
-    # -----------------------------------------------------
 
     if not is_from_source(
         forward
@@ -1708,18 +2015,12 @@ def process_private_forward(
         )
     )
 
-    # -----------------------------------------------------
-    # عنوان پست مرجع
-    # -----------------------------------------------------
-
+    # عنوان
     source_title = get_message_title(
         message
     )
 
-    # -----------------------------------------------------
-    # لینک واقعی در صورت وجود
-    # -----------------------------------------------------
-
+    # لینک واقعی
     real_link = extract_message_link(
         message
     )
@@ -1732,10 +2033,7 @@ def process_private_forward(
         )
     )
 
-    # -----------------------------------------------------
-    # ذخیره پست انتخاب‌شده
-    # -----------------------------------------------------
-
+    # ذخیره
     save_setting(
         "selected_report_source_message_id",
         source_message_id
@@ -1761,10 +2059,6 @@ def process_private_forward(
             "selected_report_source_link",
             source_link
         )
-
-    # -----------------------------------------------------
-    # پاسخ
-    # -----------------------------------------------------
 
     text = (
         "✅ پست مرجع انتخاب شد.\n\n"
@@ -1802,14 +2096,10 @@ def report(
 
         send_message(
             chat_id,
-            "❌ ابتدا کانال مرجع را با /source تعیین کنید."
+            "❌ ابتدا کانال مرجع را تعیین کنید."
         )
 
         return
-
-    # -----------------------------------------------------
-    # پست انتخاب‌شده
-    # -----------------------------------------------------
 
     selected_id = get_setting(
         "selected_report_source_message_id"
@@ -1819,7 +2109,7 @@ def report(
 
         send_message(
             chat_id,
-            "⚠️ ابتدا پست مرجع را از کانال مرجع برای ربات فوروارد کنید."
+            "⚠️ ابتدا پست مرجع را برای ربات فوروارد کنید."
         )
 
         return
@@ -1864,7 +2154,7 @@ def report(
         )
 
     # -----------------------------------------------------
-    # دریافت بازنشرهای همین پست
+    # دریافت بازنشرهای همان پست
     # -----------------------------------------------------
 
     try:
@@ -1896,13 +2186,13 @@ def report(
 
         send_message(
             chat_id,
-            f"❌ خطا در دریافت گزارش:\n{e}"
+            f"❌ خطا در گزارش:\n{e}"
         )
 
         return
 
     # -----------------------------------------------------
-    # فقط کانال مرجع فعلی
+    # فیلتر کانال مرجع
     # -----------------------------------------------------
 
     source_id = source.get(
@@ -1956,7 +2246,7 @@ def report(
             )
 
     # -----------------------------------------------------
-    # حذف کانال‌های تکراری
+    # حذف تکراری‌ها
     # -----------------------------------------------------
 
     unique_rows = {}
@@ -1969,15 +2259,23 @@ def report(
             )
         )
 
-        destination_chat_id = row.get(
+        destination_id = row.get(
             "destination_channel_id"
+        )
+
+        title = (
+            row.get(
+                "destination_title"
+            )
+            or ""
         )
 
         key = (
             username
             or str(
-                destination_chat_id
+                destination_id
             )
+            or title
         )
 
         if key not in unique_rows:
@@ -2028,7 +2326,7 @@ def report(
     )
 
     # -----------------------------------------------------
-    # هیچ بازنشری پیدا نشده
+    # بدون بازنشر
     # -----------------------------------------------------
 
     if not rows:
@@ -2045,17 +2343,13 @@ def report(
 
         return
 
-    # -----------------------------------------------------
-    # تعداد بازنشر
-    # -----------------------------------------------------
-
     text += (
         f"📢 تعداد کانال‌های بازنشرکننده: "
         f"{len(rows)}\n\n"
     )
 
     # -----------------------------------------------------
-    # لیست کانال‌ها
+    # کانال‌های مقصد
     # -----------------------------------------------------
 
     for index, row in enumerate(
@@ -2067,7 +2361,7 @@ def report(
             row.get(
                 "destination_title"
             )
-            or "کانال مقصد"
+            or "کانال مقصد نامشخص"
         )
 
         destination_username = clean_username(
@@ -2127,7 +2421,7 @@ def list_channels(
 
         send_message(
             chat_id,
-            "📭 هیچ کانال فعالی برای مانیتور وجود ندارد."
+            "📭 هیچ کانال فعالی وجود ندارد."
         )
 
         return
@@ -2192,31 +2486,23 @@ def status(
         "📊 وضعیت ربات\n\n"
     )
 
-    # مرجع
     if source:
 
-        source_title = (
-            source.get(
-                "title"
-            )
-            or "بدون عنوان"
+        text += (
+            "🎯 کانال مرجع:\n"
+            f"{source.get('title') or 'بدون عنوان'}\n"
         )
 
-        source_username = clean_username(
+        username = clean_username(
             source.get(
                 "username"
             )
         )
 
-        text += (
-            "🎯 کانال مرجع:\n"
-            f"📝 {source_title}\n"
-        )
-
-        if source_username:
+        if username:
 
             text += (
-                f"🔹 @{source_username}\n"
+                f"🔹 @{username}\n"
             )
 
         text += "\n"
@@ -2228,21 +2514,15 @@ def status(
             "❌ تعیین نشده\n\n"
         )
 
-    # کانال‌ها
     text += (
-        "📡 تعداد کانال‌های مانیتورشده:\n"
+        "📡 کانال‌های مانیتورشده:\n"
         f"{len(channels)} کانال\n\n"
     )
 
-    # پست انتخاب‌شده
     if selected_id:
 
         selected_title = get_setting(
             "selected_report_source_title"
-        )
-
-        selected_link = get_setting(
-            "selected_report_source_link"
         )
 
         text += (
@@ -2251,17 +2531,11 @@ def status(
             f"🆔 {selected_id}\n"
         )
 
-        if selected_link:
-
-            text += (
-                f"🔗 {selected_link}\n"
-            )
-
     else:
 
         text += (
             "📌 پست انتخاب‌شده:\n"
-            "❌ هنوز پستی فوروارد نشده\n"
+            "❌ وجود ندارد\n"
         )
 
     send_message(
@@ -2281,7 +2555,7 @@ def start_message(
     text = (
         "🤖 ربات پایش بازنشر\n\n"
 
-        "🎯 دستورات اصلی:\n\n"
+        "🎯 دستورات:\n\n"
 
         "/source @channel\n"
         "تعیین کانال مرجع\n\n"
@@ -2303,18 +2577,18 @@ def start_message(
 
         "━━━━━━━━━━━━━━\n\n"
 
-        "📌 روش گرفتن گزارش:\n\n"
+        "📌 برای گزارش:\n\n"
 
-        "1️⃣ پست موردنظر را از کانال مرجع "
+        "۱️⃣ پست موردنظر را از کانال مرجع "
         "برای ربات فوروارد کنید.\n\n"
 
-        "2️⃣ ربات همان پست را انتخاب می‌کند "
-        "و عنوان و پیوند پیام را نگه می‌دارد.\n\n"
+        "۲️⃣ ربات عنوان و شناسه همان پست "
+        "را ذخیره می‌کند.\n\n"
 
-        "3️⃣ سپس /report را بزنید.\n\n"
+        "۳️⃣ /report را بزنید.\n\n"
 
-        "4️⃣ فقط کانال‌هایی که همان پست "
-        "را بازنشر کرده‌اند نمایش داده می‌شوند."
+        "۴️⃣ فقط بازنشرهای همان پست "
+        "نمایش داده می‌شوند."
     )
 
     send_message(
@@ -2334,10 +2608,6 @@ def process_command(
 
     text = text.strip()
 
-    # ---------------------------------------------
-    # START
-    # ---------------------------------------------
-
     if text.startswith(
         "/start"
     ):
@@ -2348,9 +2618,9 @@ def process_command(
 
         return
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # SOURCE
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if text.startswith(
         "/source"
@@ -2393,29 +2663,29 @@ def process_command(
 
             return
 
-        if save_source(
+        save_source(
             chat
-        ):
+        )
 
-            title = (
-                chat.get(
-                    "title"
-                )
-                or username
+        title = (
+            chat.get(
+                "title"
             )
+            or username
+        )
 
-            send_message(
-                chat_id,
-                "✅ کانال مرجع با موفقیت تعیین شد.\n\n"
-                f"🎯 {title}\n"
-                f"🔹 @{username}"
-            )
+        send_message(
+            chat_id,
+            "✅ کانال مرجع تعیین شد.\n\n"
+            f"🎯 {title}\n"
+            f"🔹 @{username}"
+        )
 
         return
 
-    # ---------------------------------------------
-    # ADD CHANNEL
-    # ---------------------------------------------
+    # -----------------------------------------------------
+    # ADD
+    # -----------------------------------------------------
 
     if text.startswith(
         "/addchannel"
@@ -2436,22 +2706,21 @@ def process_command(
             parts[1]
         )
 
-        prefix = (
-            ""
-            if msg.startswith("❌")
-            else "✅ "
-        )
-
         send_message(
             chat_id,
-            prefix + msg
+            (
+                "✅ "
+                if ok
+                else ""
+            )
+            + msg
         )
 
         return
 
-    # ---------------------------------------------
-    # REMOVE CHANNEL
-    # ---------------------------------------------
+    # -----------------------------------------------------
+    # REMOVE
+    # -----------------------------------------------------
 
     if text.startswith(
         "/removechannel"
@@ -2483,9 +2752,9 @@ def process_command(
 
         return
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # LIST
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if text.startswith(
         "/listchannels"
@@ -2497,9 +2766,9 @@ def process_command(
 
         return
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # REPORT
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if text.startswith(
         "/report"
@@ -2511,9 +2780,9 @@ def process_command(
 
         return
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # STATUS
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if text.startswith(
         "/status"
@@ -2559,9 +2828,9 @@ def process_update(
 
         return
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # OWNER
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     set_owner(
         chat_id
@@ -2571,13 +2840,41 @@ def process_update(
         "type"
     )
 
-    # ---------------------------------------------
+    print(
+        "\n========================================"
+    )
+
+    print(
+        "UPDATE"
+    )
+
+    print(
+        "CHAT TYPE:",
+        chat_type
+    )
+
+    print(
+        "CHAT:",
+        chat
+    )
+
+    print(
+        "MESSAGE ID:",
+        message.get(
+            "message_id"
+        )
+    )
+
+    print(
+        "========================================\n"
+    )
+
+    # -----------------------------------------------------
     # PRIVATE
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if chat_type == "private":
 
-        # بررسی فوروارد
         forward = extract_forward(
             message
         )
@@ -2592,7 +2889,6 @@ def process_update(
 
             return
 
-        # دستورات
         text = message.get(
             "text"
         )
@@ -2606,9 +2902,9 @@ def process_update(
 
         return
 
-    # ---------------------------------------------
+    # -----------------------------------------------------
     # CHANNEL
-    # ---------------------------------------------
+    # -----------------------------------------------------
 
     if chat_type == "channel":
 
@@ -2642,7 +2938,7 @@ def get_updates(
 
 
 # =========================================================
-# MAIN LOOP
+# MAIN
 # =========================================================
 
 def main():
@@ -2652,11 +2948,16 @@ def main():
     load_owner()
 
     print(
-        "========================================"
+        "\n"
+        "=========================================="
     )
 
     print(
-        "BALE REPOST MONITOR BOT STARTED"
+        "      BALE REPOST MONITOR BOT"
+    )
+
+    print(
+        "=========================================="
     )
 
     print(
@@ -2665,7 +2966,7 @@ def main():
     )
 
     print(
-        "========================================"
+        "==========================================\n"
     )
 
     offset = None
