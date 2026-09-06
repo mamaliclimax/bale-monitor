@@ -1813,6 +1813,32 @@ def set_selected_source(
                 link_text
             )
 
+        # ---------------------------------------------------
+        # 🔧 بلافاصله گزارش کامل همین پست را هم می‌فرستیم؛
+        # چون بازنشرها دیگر مستقل از زمان انتخاب source ذخیره
+        # می‌شوند، این گزارش شامل بازنشرهایی هم می‌شود که قبل
+        # از این انتخاب در کانال‌ها/گروه‌های فعال ثبت شده بودند.
+        # ---------------------------------------------------
+
+        try:
+
+            send_markdown_message(
+                admin_user_id,
+                generate_report_markdown(
+                    admin_user_id
+                ),
+                main_keyboard(
+                    admin_user_id
+                )
+            )
+
+        except Exception as report_error:
+
+            print(
+                "AUTO REPORT AFTER SELECT ERROR:",
+                repr(report_error)
+            )
+
         return True
 
     except Exception as e:
@@ -2489,20 +2515,6 @@ def process_channel_message(message):
         return
 
     # -----------------------------------------------------
-    # تمام مدیرانی که یک پست مبدأ انتخاب کرده‌اند
-    # -----------------------------------------------------
-
-    selected_sources = get_all_selected_sources()
-
-    if not selected_sources:
-
-        print(
-            "⏭ NO ADMIN SELECTED SOURCE"
-        )
-
-        return
-
-    # -----------------------------------------------------
     # مقصد
     # -----------------------------------------------------
 
@@ -2523,7 +2535,14 @@ def process_channel_message(message):
     # -----------------------------------------------------
     # بررسی Forward
     #
-    # extract_forward فقط یک بار اجرا شود
+    # 🔧 نکته‌ی مهم: منبع (source) این پست از روی خودِ Forward
+    # استخراج می‌شود، نه از روی «پست مبدأ انتخابی» یک مدیر خاص.
+    # به همین دلیل ثبت بازنشر کاملاً مستقل از اینکه در همان
+    # لحظه کسی این پست را به‌عنوان مبدأ انتخاب کرده باشد یا نه
+    # انجام می‌شود. این کار باعث می‌شود وقتی یک مدیر بعداً همین
+    # پست را در خصوصی برای ربات Forward می‌کند، تمام بازنشرهای
+    # قبلی آن (چه قبل چه بعد از انتخاب) در گزارش دیده شوند و
+    # گزارش هر بار از صفر شروع نشود.
     # -----------------------------------------------------
 
     forwarded = extract_forward(
@@ -2538,34 +2557,94 @@ def process_channel_message(message):
 
         return
 
-    forwarded_channel_id = str(
-        forwarded.get("channel_id")
-    )
-
-    forwarded_message_id = str(
-        forwarded.get("message_id")
-    )
+    source = forwarded
 
     print(
         "FORWARDED SOURCE:",
-        forwarded_channel_id,
-        forwarded_message_id
+        source.get("channel_id"),
+        source.get("message_id")
     )
 
     # -----------------------------------------------------
-    # مدیرانی که این پیام دقیقاً مربوط به source آنهاست
+    # ذخیره‌ی بازنشر (مستقل از انتخاب مدیر)
     # -----------------------------------------------------
 
-    matched_admins = []
+    already_exists = repost_exists(
+        source.get("channel_id"),
+        source.get("message_id"),
+        str(chat_id)
+    )
 
-    for source in selected_sources:
+    if already_exists:
+
+        print(
+            "⏭ REPOST ALREADY EXISTS:",
+            source.get("channel_id"),
+            source.get("message_id"),
+            chat_id
+        )
+
+        # قبلاً ثبت شده؛ نیازی به ذخیره یا اعلان دوباره نیست.
+        return
+
+    saved = save_repost(
+        source,
+        destination,
+        destination_message_id,
+        title
+    )
+
+    if not saved:
+
+        print(
+            "❌ REPOST WAS NOT SAVED:",
+            source.get("channel_id"),
+            source.get("message_id"),
+            chat_id
+        )
+
+        return
+
+    print("=" * 60)
+    print("✅ REPOST SAVED")
+    print(
+        "SOURCE:",
+        source.get("channel_id"),
+        source.get("message_id")
+    )
+    print(
+        "DESTINATION:",
+        chat_id,
+        destination_message_id
+    )
+    print("=" * 60)
+
+    # -----------------------------------------------------
+    # اگر مدیری همین لحظه دقیقاً همین source را به‌عنوان مبدأ
+    # انتخاب کرده باشد، فوراً به او اعلان لحظه‌ای می‌فرستیم.
+    # (اگر هنوز کسی این source را انتخاب نکرده باشد، بازنشر
+    # همچنان ذخیره شده و بعداً که مدیر آن پست را Forward کند
+    # در گزارش کامل نمایش داده می‌شود.)
+    # -----------------------------------------------------
+
+    selected_sources = get_all_selected_sources()
+
+    forwarded_channel_id = str(
+        source.get("channel_id")
+    )
+
+    forwarded_message_id = str(
+        source.get("message_id")
+    )
+
+    for admin_source in selected_sources:
 
         source_channel_id = str(
-            source.get("channel_id")
+            admin_source.get("channel_id")
         )
 
         source_message_id = str(
-            source.get("message_id")
+            admin_source.get("message_id")
         )
 
         matched = (
@@ -2576,142 +2655,24 @@ def process_channel_message(message):
             == source_message_id
         )
 
-        if matched:
-
-            matched_admins.append(
-                source
-            )
-
-            print(
-                "🎯 MATCHED ADMIN:",
-                source.get("admin_user_id")
-            )
-
-    if not matched_admins:
-
-        print(
-            "⏭ NO ADMIN SOURCE MATCHED"
-        )
-
-        return
-
-    # -----------------------------------------------------
-    # برای هر source فقط یک بار رکورد repost ذخیره می‌کنیم
-    # ولی به تمام مدیرانی که همان source را انتخاب کرده‌اند
-    # اعلان ارسال می‌کنیم.
-    # -----------------------------------------------------
-
-    processed_sources = set()
-
-    for source in matched_admins:
-
-        source_key = (
-            str(source.get("channel_id")),
-            str(source.get("message_id")),
-            str(chat_id)
-        )
-
-        if source_key in processed_sources:
-
-            print(
-                "⏭ SOURCE ALREADY PROCESSED:",
-                source_key
-            )
-
+        if not matched:
             continue
 
-        processed_sources.add(
-            source_key
-        )
-
-        # -------------------------------------------------
-        # duplicate
-        # -------------------------------------------------
-
-        already_exists = repost_exists(
-            source.get("channel_id"),
-            source.get("message_id"),
-            str(chat_id)
-        )
-
-        if already_exists:
-
-            print(
-                "⏭ REPOST ALREADY EXISTS:",
-                source_key
-            )
-
-            # اگر قبلاً ثبت شده، برای مدیر جدیدی که همان
-            # source را انتخاب کرده اعلان تکراری نمی‌فرستیم.
-            continue
-
-        saved = save_repost(
-            source,
-            destination,
-            destination_message_id,
-            title
-        )
-
-        if not saved:
-
-            print(
-                "❌ REPOST WAS NOT SAVED:",
-                source_key
-            )
-
-            continue
-
-        print("=" * 60)
-        print("✅ REPOST SAVED")
-        print(
-            "SOURCE:",
-            source.get("channel_id"),
-            source.get("message_id")
-        )
-        print(
-            "DESTINATION:",
-            chat_id,
-            destination_message_id
-        )
-        print(
-            "ADMIN COUNT:",
-            len(matched_admins)
-        )
-        print("=" * 60)
-
-    # -----------------------------------------------------
-    # اعلان برای همه مدیران مرتبط
-    #
-    # اگر یک source توسط چند مدیر انتخاب شده باشد،
-    # همان گزارش برای هرکدام جداگانه ارسال می‌شود.
-    # -----------------------------------------------------
-
-    for source in matched_admins:
-
-        admin_user_id = source.get(
+        admin_user_id = admin_source.get(
             "admin_user_id"
         )
 
         if not admin_user_id:
             continue
 
-        # فقط اگر رکورد واقعاً وجود دارد
-        if not repost_exists(
-            source.get("channel_id"),
-            source.get("message_id"),
-            str(chat_id)
-        ):
-
-            print(
-                "⚠️ ALERT SKIPPED - REPOST NOT IN DB:",
-                admin_user_id
-            )
-
-            continue
+        print(
+            "🎯 LIVE ALERT TO ADMIN:",
+            admin_user_id
+        )
 
         send_repost_alert(
             admin_user_id,
-            source,
+            admin_source,
             destination,
             message,
             destination_message_id
