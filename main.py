@@ -2851,9 +2851,16 @@ def handle_group_service_message(message):
 
     chat_type = chat.get("type")
 
+    # 🔧 نکته‌ی مهم درباره‌ی بله: برخلاف رفتار معمول تلگرام،
+    # بله رویداد «اضافه/حذف شدن ربات» را برای کانال‌ها هم از
+    # طریق همین پیام سرویسی (new_chat_members / left_chat_member)
+    # می‌فرستد، نه صرفاً از طریق my_chat_member. پس باید نوع
+    # "channel" را هم اینجا پوشش بدهیم، وگرنه ربات هیچ‌وقت
+    # از اضافه/حذف شدنش در کانال باخبر نمی‌شود.
     if chat_type not in (
         "group",
-        "supergroup"
+        "supergroup",
+        "channel"
     ):
         return False
 
@@ -5135,12 +5142,16 @@ def process_update(update):
     )
 
     # -----------------------------------------------------
-    # GROUP SERVICE
+    # GROUP / CHANNEL SERVICE
+    #
+    # 🔧 بله برای کانال‌ها هم new_chat_members/left_chat_member
+    # می‌فرستد، پس "channel" هم باید اینجا بررسی شود.
     # -----------------------------------------------------
 
     if chat_type in (
         "group",
-        "supergroup"
+        "supergroup",
+        "channel"
     ):
 
         try:
