@@ -2332,7 +2332,8 @@ def save_repost(
     source,
     destination,
     destination_message_id,
-    message_title=""
+    message_title="",
+    message=None
 ):
 
     try:
@@ -2345,6 +2346,10 @@ def save_repost(
             destination_username,
             destination.get("id"),
             destination_message_id
+        )
+
+        views = extract_message_views(
+            message
         )
 
         data = {
@@ -2382,6 +2387,14 @@ def save_repost(
                 "destination_message_link"
             ] = destination_link
 
+        # 🧪 آزمایشی: فقط اگر واقعاً عددی برای ویو پیدا شد
+        # اضافه می‌شود. چون ممکن است ستون "views" در جدول
+        # reposts وجود نداشته باشد، این فیلد جزو موارد
+        # fallback-پذیر در ادامه است.
+        if views is not None:
+
+            data["views"] = views
+
         if repost_exists(
             source.get("channel_id"),
             source.get("message_id"),
@@ -2394,37 +2407,56 @@ def save_repost(
 
             return False
 
-        try:
+        # -------------------------------------------------
+        # تلاش با تمام فیلدها؛ در صورت خطا، فیلدهای احتمالاً
+        # ناموجود در جدول (destination_message_link و سپس
+        # views) به‌ترتیب حذف و دوباره تلاش می‌شود.
+        # -------------------------------------------------
 
-            result = (
-                supabase
-                .table("reposts")
-                .insert(data)
-                .execute()
-            )
+        attempt_data = dict(data)
 
-            return bool(result.data)
+        for attempt in range(3):
 
-        except Exception as first_error:
+            try:
 
-            print(
-                "SAVE REPOST WITH LINK ERROR:",
-                repr(first_error)
-            )
+                result = (
+                    supabase
+                    .table("reposts")
+                    .insert(attempt_data)
+                    .execute()
+                )
 
-            data.pop(
-                "destination_message_link",
-                None
-            )
+                return bool(result.data)
 
-            result = (
-                supabase
-                .table("reposts")
-                .insert(data)
-                .execute()
-            )
+            except Exception as insert_error:
 
-            return bool(result.data)
+                print(
+                    "SAVE REPOST INSERT ERROR "
+                    f"(attempt {attempt + 1}):",
+                    repr(insert_error)
+                )
+
+                if "destination_message_link" in attempt_data:
+
+                    attempt_data.pop(
+                        "destination_message_link",
+                        None
+                    )
+
+                    continue
+
+                if "views" in attempt_data:
+
+                    attempt_data.pop(
+                        "views",
+                        None
+                    )
+
+                    continue
+
+                raise
+
+        return False
 
     except Exception as e:
 
@@ -2462,6 +2494,40 @@ def get_message_title(message):
         title = title[:100] + "…"
 
     return title
+
+
+def extract_message_views(message):
+
+    # 🧪 حالت آزمایشی: مستندات رسمی بله فیلد "views" را در
+    # شیء Message تعریف نکرده‌اند، اما اگر روزی این فیلد
+    # (یا مشابهش) به‌صورت مستندنشده در payload پیام موجود
+    # باشد، اینجا آن را می‌گیریم. اگر هیچ‌کدام وجود نداشته
+    # باشد، فقط None برمی‌گردد و هیچ خطایی رخ نمی‌دهد.
+
+    if not message:
+        return None
+
+    for key in (
+        "views",
+        "view_count",
+        "views_count",
+        "seen_count"
+    ):
+
+        value = message.get(key)
+
+        if value is None:
+            continue
+
+        try:
+
+            return int(value)
+
+        except Exception:
+
+            continue
+
+    return None
 
 
 # =========================================================
@@ -2797,7 +2863,8 @@ def process_channel_message(message):
         source,
         destination,
         destination_message_id,
-        title
+        title,
+        message
     )
 
     if not saved:
@@ -3440,6 +3507,10 @@ def generate_report_markdown(
             destination_chat_id
         )
 
+        views_count = row.get(
+            "views"
+        )
+
         text += (
             f"*{to_persian_digits(index)}.* "
             f"📡 {markdown_text(destination_title)}\n"
@@ -3456,6 +3527,13 @@ def generate_report_markdown(
             text += (
                 f"   👥 اعضا: "
                 f"{to_persian_digits(members_count)}\n"
+            )
+
+        if views_count is not None:
+
+            text += (
+                f"   👁 ویو: "
+                f"{to_persian_digits(views_count)}\n"
             )
 
         text += (
@@ -3648,6 +3726,10 @@ def generate_report(
             destination_chat_id
         )
 
+        views_count = row.get(
+            "views"
+        )
+
         text += (
             f"<b>{to_persian_digits(index)}.</b> "
             f"📡 {html_text(destination_title)}\n"
@@ -3664,6 +3746,13 @@ def generate_report(
             text += (
                 f"   👥 <b>اعضا:</b> "
                 f"{to_persian_digits(members_count)}\n"
+            )
+
+        if views_count is not None:
+
+            text += (
+                f"   👁 <b>ویو:</b> "
+                f"{to_persian_digits(views_count)}\n"
             )
 
         text += (
