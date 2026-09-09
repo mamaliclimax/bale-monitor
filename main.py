@@ -5766,16 +5766,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-id"
-                    )
-
-                    if update_id is not None:
-
-                        LAST_UPDATE_ID = update_id
-
-                        offset = (
-                            int(update_id) + 1
-                        )
-
-                    process_update(
-      
