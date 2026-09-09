@@ -275,6 +275,93 @@ def format_iran_datetime(value):
         return str(value)
 
 
+def humanize_elapsed_fa(value):
+
+    if not value:
+        return "-"
+
+    try:
+
+        if isinstance(value, datetime):
+            dt = value
+
+        else:
+
+            value = str(value).strip()
+
+            if value.endswith("Z"):
+                value = value[:-1] + "+00:00"
+
+            dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+
+        seconds = int(
+            (now - dt).total_seconds()
+        )
+
+        if seconds < 0:
+            seconds = 0
+
+        if seconds < 60:
+            return "چند لحظه پیش"
+
+        minutes = seconds // 60
+
+        if minutes < 60:
+
+            return (
+                f"{to_persian_digits(minutes)} "
+                "دقیقه پیش"
+            )
+
+        hours = minutes // 60
+
+        if hours < 24:
+
+            return (
+                f"{to_persian_digits(hours)} "
+                "ساعت پیش"
+            )
+
+        days = hours // 24
+
+        if days < 30:
+
+            return (
+                f"{to_persian_digits(days)} "
+                "روز پیش"
+            )
+
+        months = days // 30
+
+        if months < 12:
+
+            return (
+                f"{to_persian_digits(months)} "
+                "ماه پیش"
+            )
+
+        years = days // 365
+
+        return (
+            f"{to_persian_digits(years)} "
+            "سال پیش"
+        )
+
+    except Exception as e:
+
+        print(
+            "HUMANIZE ELAPSED ERROR:",
+            repr(e)
+        )
+
+        return "-"
+
+
 # =========================================================
 # BALE API
 # =========================================================
@@ -373,6 +460,56 @@ def get_chat_member(chat_id, user_id):
         {
             "chat_id": str(chat_id),
             "user_id": str(user_id)
+        }
+    )
+
+
+def get_chat_members_count(chat_id):
+
+    if chat_id is None:
+        return None
+
+    result = bale_request(
+        "getChatMembersCount",
+        {
+            "chat_id": str(chat_id)
+        }
+    )
+
+    if result is None:
+        return None
+
+    if isinstance(result, dict):
+
+        # برخی سرورها ممکن است این متد را به شکل
+        # {"count": N} برگردانند؛ برای اطمینان هر دو حالت
+        # را پشتیبانی می‌کنیم.
+        result = (
+            result.get("count")
+            or result.get("members_count")
+        )
+
+    try:
+
+        return int(result)
+
+    except Exception:
+
+        return None
+
+
+def forward_message(
+    to_chat_id,
+    from_chat_id,
+    message_id
+):
+
+    return bale_request(
+        "forwardMessage",
+        {
+            "chat_id": str(to_chat_id),
+            "from_chat_id": str(from_chat_id),
+            "message_id": message_id
         }
     )
 
@@ -1510,6 +1647,75 @@ def get_all_channels():
         )
 
         return []
+
+
+# =========================================================
+# BROADCAST (بازنشر گسترده)
+# =========================================================
+
+def broadcast_message_to_channels(
+    from_chat_id,
+    message_id
+):
+
+    channels = get_active_channels()
+
+    success = []
+    failed = []
+
+    for row in channels:
+
+        dest_chat_id = row.get(
+            "chat_id"
+        )
+
+        if not dest_chat_id:
+            continue
+
+        try:
+
+            result = forward_message(
+                dest_chat_id,
+                from_chat_id,
+                message_id
+            )
+
+            if result:
+
+                success.append(row)
+
+                print(
+                    "✅ BROADCAST OK:",
+                    dest_chat_id
+                )
+
+            else:
+
+                failed.append(row)
+
+                print(
+                    "❌ BROADCAST FAILED:",
+                    dest_chat_id
+                )
+
+            # برای جلوگیری از rate-limit سرور بله
+            time.sleep(0.25)
+
+        except Exception as e:
+
+            failed.append(row)
+
+            print(
+                "BROADCAST EXCEPTION:",
+                dest_chat_id,
+                repr(e)
+            )
+
+    return {
+        "total": len(channels),
+        "success": success,
+        "failed": failed
+    }
 
 
 # =========================================================
@@ -3218,8 +3424,20 @@ def generate_report_markdown(
             or "بدون عنوان"
         )
 
+        created_at_raw = row.get(
+            "created_at"
+        )
+
         created_at = format_iran_datetime(
-            row.get("created_at")
+            created_at_raw
+        )
+
+        elapsed = humanize_elapsed_fa(
+            created_at_raw
+        )
+
+        members_count = get_chat_members_count(
+            destination_chat_id
         )
 
         text += (
@@ -3233,9 +3451,17 @@ def generate_report_markdown(
                 f"   🔖 @{markdown_text(destination_username)}\n"
             )
 
+        if members_count is not None:
+
+            text += (
+                f"   👥 اعضا: "
+                f"{to_persian_digits(members_count)}\n"
+            )
+
         text += (
             f"   📝 {markdown_text(message_title)}\n"
-            f"   🕐 {markdown_text(created_at)}\n"
+            f"   🕐 {markdown_text(created_at)} "
+            f"\\({markdown_text(elapsed)}\\)\n"
         )
 
         if destination_link:
@@ -3406,8 +3632,20 @@ def generate_report(
             or "بدون عنوان"
         )
 
+        created_at_raw = row.get(
+            "created_at"
+        )
+
         created_at = format_iran_datetime(
-            row.get("created_at")
+            created_at_raw
+        )
+
+        elapsed = humanize_elapsed_fa(
+            created_at_raw
+        )
+
+        members_count = get_chat_members_count(
+            destination_chat_id
         )
 
         text += (
@@ -3421,9 +3659,17 @@ def generate_report(
                 f"   🔖 @{html_text(destination_username)}\n"
             )
 
+        if members_count is not None:
+
+            text += (
+                f"   👥 <b>اعضا:</b> "
+                f"{to_persian_digits(members_count)}\n"
+            )
+
         text += (
             f"   📝 {html_text(message_title)}\n"
-            f"   🕐 {html_text(created_at)}\n"
+            f"   🕐 {html_text(created_at)} "
+            f"({html_text(elapsed)})\n"
         )
 
         if destination_link:
@@ -3634,6 +3880,9 @@ def main_keyboard(user_id):
                 {"text": "📈 وضعیت ربات"}
             ],
             [
+                {"text": "📣 بازنشر گسترده"}
+            ],
+            [
                 {"text": "🗑️ پاک کردن کلیه گزارش‌ها"}
             ],
             [
@@ -3656,6 +3905,9 @@ def main_keyboard(user_id):
             [
                 {"text": "🔄 همگام‌سازی"},
                 {"text": "📈 وضعیت ربات"}
+            ],
+            [
+                {"text": "📣 بازنشر گسترده"}
             ],
             [
                 {"text": "❓ راهنما"}
@@ -3771,6 +4023,11 @@ def send_help(chat_id, user_id):
             "🔹 <b>همگام‌سازی</b>\n"
             "برای بررسی مقصدهای ثبت‌شده از گزینه "
             "«🔄 همگام‌سازی» استفاده کنید.\n\n"
+            "🔹 <b>بازنشر گسترده</b>\n"
+            "با «📣 بازنشر گسترده» و سپس Forward کردن "
+            "یک پست، همان پست به‌صورت خودکار به تمام "
+            "مقصدهای فعال ارسال می‌شود (نیاز به ادمین "
+            "بودن ربات در آن مقصد دارد).\n\n"
             "🔹 <b>شناسه من</b>\n"
             "<code>/myid</code>"
         )
@@ -4394,6 +4651,32 @@ def handle_button(
 
         return True
 
+    if text == "📣 بازنشر گسترده":
+
+        active_count = len(
+            get_active_channels()
+        )
+
+        PENDING_ACTIONS[
+            str(chat_id)
+        ] = "broadcast_forward"
+
+        send_message(
+            chat_id,
+            "📣 <b>بازنشر گسترده</b>\n\n"
+            "پستی که می‌خواهید ارسال شود را برای من "
+            "Forward کنید (یا مستقیم بفرستید).\n\n"
+            f"این پست به تمام "
+            f"<b>{to_persian_digits(active_count)}</b> "
+            "مقصد فعال ارسال خواهد شد.\n\n"
+            "⚠️ توجه: ربات باید در آن مقصد عضو/ادمین "
+            "باشد و اجازه ارسال پیام داشته باشد، وگرنه "
+            "برای همان مقصد ناموفق گزارش می‌شود.\n\n"
+            "برای انصراف /cancel را بفرستید."
+        )
+
+        return True
+
     if text == "🔄 همگام‌سازی":
 
         send_message(
@@ -4712,6 +4995,120 @@ def process_callback_query(callback_query):
 # PENDING ACTION
 # =========================================================
 
+def handle_broadcast_forward(
+    message,
+    chat_id,
+    user_id
+):
+
+    key = str(
+        chat_id
+    )
+
+    message_id = message.get(
+        "message_id"
+    )
+
+    if message_id is None:
+
+        send_message(
+            chat_id,
+            "❌ پیام قابل شناسایی نبود. "
+            "لطفاً دوباره تلاش کنید یا "
+            "/cancel را بفرستید."
+        )
+
+        return True
+
+    PENDING_ACTIONS.pop(
+        key,
+        None
+    )
+
+    active_channels = get_active_channels()
+
+    if not active_channels:
+
+        send_message(
+            chat_id,
+            "⚠️ هیچ مقصد فعالی برای ارسال وجود ندارد.",
+            main_keyboard(user_id)
+        )
+
+        return True
+
+    send_message(
+        chat_id,
+        "⏳ در حال ارسال پست به تمام مقصدهای فعال..."
+    )
+
+    result = broadcast_message_to_channels(
+        chat_id,
+        message_id
+    )
+
+    success_count = len(
+        result["success"]
+    )
+
+    failed_count = len(
+        result["failed"]
+    )
+
+    text = (
+        "📣 <b>نتیجه بازنشر گسترده</b>\n\n"
+        f"📊 کل مقصدهای فعال: "
+        f"{to_persian_digits(result['total'])}\n"
+        f"✅ ارسال موفق: "
+        f"{to_persian_digits(success_count)}\n"
+        f"❌ ارسال ناموفق: "
+        f"{to_persian_digits(failed_count)}\n"
+    )
+
+    if result["failed"]:
+
+        text += (
+            "\n"
+            "🔻 <b>مقصدهای ناموفق:</b>\n"
+        )
+
+        for row in result["failed"][:25]:
+
+            title = (
+                row.get("title")
+                or row.get("username")
+                or row.get("chat_id")
+                or "-"
+            )
+
+            text += (
+                f"• {html_text(title)}\n"
+            )
+
+        if failed_count > 25:
+
+            text += (
+                f"... و "
+                f"{to_persian_digits(failed_count - 25)} "
+                "مورد دیگر\n"
+            )
+
+        text += (
+            "\n"
+            "💡 معمولاً دلیل ناموفق بودن این است که "
+            "ربات در آن مقصد ادمین نیست یا اجازه‌ی "
+            "ارسال پیام ندارد."
+        )
+
+    send_message(
+        chat_id,
+        text,
+        main_keyboard(user_id)
+    )
+
+    return True
+
+
 def handle_pending_action(
     message,
     chat_id,
@@ -4729,19 +5126,16 @@ def handle_pending_action(
     if not action:
         return False
 
-    text = (
-        message.get("text")
-        or ""
-    ).strip()
-
-    if not text:
-        return False
-
     user_id = (
         user.get("id")
         if user
         else None
     )
+
+    text = (
+        message.get("text")
+        or ""
+    ).strip()
 
     if text.lower() in (
         "/cancel",
@@ -4761,6 +5155,24 @@ def handle_pending_action(
         )
 
         return True
+
+    # -----------------------------------------------------
+    # بازنشر گسترده
+    #
+    # این حالت ممکن است روی پیام‌های غیرمتنی (عکس/ویدیو/...)
+    # هم اتفاق بیفتد، پس نباید به وجود text وابسته باشد.
+    # -----------------------------------------------------
+
+    if action == "broadcast_forward":
+
+        return handle_broadcast_forward(
+            message,
+            chat_id,
+            user_id
+        )
+
+    if not text:
+        return False
 
     if action == "add_channel":
 
@@ -5354,3 +5766,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+id"
+                    )
+
+                    if update_id is not None:
+
+                        LAST_UPDATE_ID = update_id
+
+                        offset = (
+                            int(update_id) + 1
+                        )
+
+                    process_update(
+      
