@@ -2530,6 +2530,26 @@ def extract_message_views(message):
     return None
 
 
+def update_repost_views(source_channel_id, source_message_id, destination_channel_id, message):
+    """در صورت وجود ویو در payload، رکورد بازنشر قبلی را به‌روزرسانی می‌کند."""
+    views = extract_message_views(message)
+    if views is None:
+        return False
+    try:
+        result = (
+            supabase.table("reposts").update({"views": views})
+            .eq("source_channel_id", str(source_channel_id))
+            .eq("source_message_id", str(source_message_id))
+            .eq("destination_channel_id", str(destination_channel_id))
+            .execute()
+        )
+        print("👁 REPOST VIEWS UPDATED:", source_channel_id, source_message_id, destination_channel_id, views)
+        return bool(result.data)
+    except Exception as e:
+        print("UPDATE REPOST VIEWS ERROR:", repr(e))
+        return False
+
+
 # =========================================================
 # ADMIN IDS
 # =========================================================
@@ -2621,6 +2641,8 @@ def send_repost_alert(
         message
     )
 
+    live_views = extract_message_views(message)
+
     text = (
         "🔔 <b>بازنشر جدید شناسایی شد</b>\n\n"
         f"📡 <b>مقصد:</b> "
@@ -2640,6 +2662,12 @@ def send_repost_alert(
         f"🕐 <b>زمان:</b> "
         f"{format_iran_datetime(now_iso())}"
     )
+
+    if live_views is not None:
+        text += (
+            f"\n👁 <b>ویو:</b> "
+            f"{to_persian_digits(live_views)}"
+        )
 
     # فقط همان مدیر
     send_message(
@@ -2856,7 +2884,15 @@ def process_channel_message(message):
             chat_id
         )
 
-        # قبلاً ثبت شده؛ نیازی به ذخیره یا اعلان دوباره نیست.
+        # اگر payload ویو داشته باشد، رکورد قبلی را هم به‌روزرسانی کن.
+        update_repost_views(
+            source.get("channel_id"),
+            source.get("message_id"),
+            str(chat_id),
+            message
+        )
+
+        # بازنشر تکراری دوباره اعلان نمی‌شود.
         return
 
     saved = save_repost(
@@ -3655,6 +3691,17 @@ def generate_report(
         f"\n📈 <b>تعداد بازنشر فعال:</b> "
         f"{to_persian_digits(len(rows))}\n"
     )
+
+    total_views = sum(
+        int(row.get("views") or 0)
+        for row in rows
+        if str(row.get("views") or "").isdigit()
+    )
+    if total_views > 0:
+        text += (
+            f"👁 <b>مجموع ویو ثبت‌شده:</b> "
+            f"{to_persian_digits(total_views)}\n"
+        )
 
     if not rows:
 
