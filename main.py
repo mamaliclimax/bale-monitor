@@ -827,6 +827,245 @@ def handle_ai_question(
 
 
 # =========================================================
+# IMAGE GENERATION (Pollinations.ai) - رایگان، بدون کلید
+# =========================================================
+
+IMAGE_COMMANDS = ("/image", "/عکس")
+
+
+def get_image_prompt_from_text(text, bot_username):
+    """
+    اگر پیام با یکی از دستورات ساخت عکس شروع شده باشد، توضیح
+    عکس را استخراج می‌کند. در غیر این صورت None برمی‌گرداند.
+    دستور می‌تواند به‌شکل "/image@bot_username توضیح" هم باشد
+    (رفتار معمول دستورات در گروه).
+    """
+
+    if not text:
+        return None
+
+    stripped = text.strip()
+
+    first_word = stripped.split(" ", 1)[0]
+    rest = (
+        stripped.split(" ", 1)[1]
+        if " " in stripped else ""
+    ).strip()
+
+    # حذف بخش @bot_username از انتهای دستور، اگر وجود داشته باشد
+    if bot_username and "@" in first_word:
+        first_word = first_word.split("@", 1)[0]
+
+    if first_word.lower() not in IMAGE_COMMANDS:
+        return None
+
+    return rest or None
+
+
+def generate_pollinations_image(prompt):
+    """
+    ساخت عکس از روی متن با Pollinations.ai (رایگان، بدون نیاز
+    به کلید API). خروجی مسیر یک فایل موقت jpg است یا None در
+    صورت خطا. فایل موقت باید توسط فراخوان حذف شود.
+    """
+
+    if not prompt or not prompt.strip():
+        return None
+
+    try:
+
+        import tempfile
+        from urllib.parse import quote
+
+        encoded_prompt = quote(prompt.strip())
+
+        url = (
+            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+            f"?width=1024&height=1024&nologo=true"
+        )
+
+        response = requests.get(url, timeout=90)
+
+        if response.status_code != 200:
+
+            print(
+                "POLLINATIONS ERROR:",
+                response.status_code,
+                response.text[:300]
+            )
+
+            return None
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".jpg",
+            delete=False
+        )
+
+        tmp.write(response.content)
+        tmp.close()
+
+        return tmp.name
+
+    except Exception as e:
+
+        print(
+            "POLLINATIONS EXCEPTION:",
+            repr(e)
+        )
+
+        return None
+
+
+def send_photo_file(
+    chat_id,
+    file_path,
+    caption=None,
+    reply_to_message_id=None
+):
+    """
+    ارسال یک فایل عکس با آپلود multipart/form-data به بله.
+    """
+
+    url = f"{BALE_API}/sendPhoto"
+
+    data = {
+        "chat_id": str(chat_id)
+    }
+
+    if caption:
+        data["caption"] = caption
+
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+
+    try:
+
+        with open(file_path, "rb") as f:
+
+            response = requests.post(
+                url,
+                data=data,
+                files={"photo": f},
+                timeout=90
+            )
+
+        print(
+            "BALE sendPhoto:",
+            response.status_code
+        )
+
+        try:
+            result = response.json()
+
+        except Exception:
+
+            print(
+                "BALE sendPhoto RAW:",
+                response.text[:2000]
+            )
+
+            return None
+
+        if not result.get("ok"):
+
+            print(
+                "BALE sendPhoto ERROR:",
+                result
+            )
+
+            return None
+
+        return result.get("result")
+
+    except Exception as e:
+
+        print(
+            "BALE sendPhoto EXCEPTION:",
+            repr(e)
+        )
+
+        return None
+
+
+def handle_image_command(message, chat, bot_username):
+    """
+    اگر پیام دستور ساخت عکس باشد (/image یا /عکس)، عکس را با
+    Pollinations.ai می‌سازد و ارسال می‌کند. خروجی True یعنی
+    پیام پردازش شد (چه موفق چه ناموفق).
+    """
+
+    text = (message.get("text") or "").strip()
+
+    prompt = get_image_prompt_from_text(text, bot_username)
+
+    if prompt is None and text.split(" ", 1)[0].split("@", 1)[0].lower() not in IMAGE_COMMANDS:
+        return False
+
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    if not prompt:
+
+        send_message(
+            chat_id,
+            "لطفاً بعد از دستور، توضیح عکس مورد نظرت را بنویس.\n"
+            "مثال: /image یک گربه فضانورد",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
+    send_message(
+        chat_id,
+        "⏳ در حال ساخت عکس...",
+        reply_to_message_id=message_id
+    )
+
+    image_path = None
+
+    try:
+
+        image_path = generate_pollinations_image(prompt)
+
+        if not image_path:
+
+            send_message(
+                chat_id,
+                "متاسفانه در ساخت عکس خطایی پیش اومد، دوباره امتحان کن.",
+                reply_to_message_id=message_id
+            )
+
+            return True
+
+        send_photo_file(
+            chat_id,
+            image_path,
+            caption=html_text(prompt),
+            reply_to_message_id=message_id
+        )
+
+    except Exception as e:
+
+        print(
+            "IMAGE COMMAND ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+    finally:
+
+        if image_path and os.path.exists(image_path):
+
+            try:
+                os.remove(image_path)
+            except Exception:
+                pass
+
+    return True
+
+
+# =========================================================
 # BALE METHODS
 # =========================================================
 
@@ -3346,6 +3585,15 @@ def process_channel_message(message):
                 bot = get_me()
                 bot_id = bot.get("id") if bot else None
                 bot_username = bot.get("username") if bot else None
+
+                # 🖼 دستور ساخت عکس (/image یا /عکس) در گروه به
+                # مانند سایر دستورات، بدون نیاز به منشن کار می‌کند.
+                if handle_image_command(
+                    message,
+                    chat,
+                    bot_username
+                ):
+                    return
 
                 handle_ai_question(
                     message,
@@ -5971,6 +6219,28 @@ def process_private_message(message):
             message,
             chat_id,
             user
+        ):
+            return
+
+    # -----------------------------------------------------
+    # IMAGE COMMAND (/image یا /عکس)
+    # -----------------------------------------------------
+
+    if text.startswith("/"):
+
+        try:
+
+            bot = get_me()
+            bot_username = bot.get("username") if bot else None
+
+        except Exception:
+
+            bot_username = None
+
+        if handle_image_command(
+            message,
+            chat,
+            bot_username
         ):
             return
 
