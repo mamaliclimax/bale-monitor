@@ -18,6 +18,12 @@ BALE_TOKEN = os.environ.get("BALE_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 
+# کلید هوش مصنوعی (Gemini) برای پاسخ‌گویی متنی در گروه‌ها.
+# اختیاری است: اگر تنظیم نشود، قابلیت پاسخ‌گویی هوشمند در گروه
+# غیرفعال می‌ماند ولی بقیه‌ی ربات (بازنشر/گزارش) طبق معمول کار می‌کند.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+
 if not BALE_TOKEN:
     raise Exception("BALE_TOKEN is missing")
 
@@ -27,7 +33,14 @@ if not SUPABASE_URL:
 if not SUPABASE_SECRET_KEY:
     raise Exception("SUPABASE_SECRET_KEY is missing")
 
+if not GEMINI_API_KEY:
+    print("⚠️ WARNING: GEMINI_API_KEY is missing. AI group replies are disabled.")
+
 BALE_API = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
+GEMINI_API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
 
 supabase = create_client(
     SUPABASE_URL,
@@ -421,6 +434,285 @@ def bale_request(
 
 
 # =========================================================
+# AI (GEMINI) - پاسخ‌گویی متنی
+# =========================================================
+
+# حداکثر طول تاریخچه‌ای که به‌عنوان context نگه می‌داریم
+AI_MAX_HISTORY = 6
+# حافظه‌ی کوتاه‌مدت هر گفتگو (گروه یا خصوصی):
+# { chat_id: [ {"role":..,"text":..}, ... ] }
+AI_CHAT_HISTORY = {}
+
+AI_SYSTEM_PROMPT = (
+    "تو یک دستیار هوشمند فارسی‌زبان هستی که داخل پیام‌رسان بله "
+    "فعالیت می‌کنی. پاسخ‌هایت را کوتاه، مفید، محاوره‌ای و مودبانه بنویس. "
+    "اگر سوال نامفهوم بود، مؤدبانه بپرس منظور دقیق‌تر چیست."
+)
+
+
+def ask_gemini(prompt, history=None):
+    """
+    ارسال یک سوال متنی به Gemini و دریافت پاسخ.
+    در صورت نبود کلید یا بروز خطا، None برمی‌گرداند.
+    """
+
+    if not GEMINI_API_KEY:
+        return None
+
+    if not prompt or not prompt.strip():
+        return None
+
+    contents = []
+
+    for item in (history or []):
+
+        role = "model" if item.get("role") == "model" else "user"
+
+        contents.append({
+            "role": role,
+            "parts": [{"text": item.get("text", "")}]
+        })
+
+    contents.append({
+        "role": "user",
+        "parts": [{"text": prompt}]
+    })
+
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": AI_SYSTEM_PROMPT}]
+        },
+        "contents": contents
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
+    try:
+
+        response = requests.post(
+            GEMINI_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=40
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "GEMINI ERROR:",
+                response.status_code,
+                response.text[:500]
+            )
+
+            return None
+
+        data = response.json()
+
+        candidates = data.get("candidates") or []
+
+        if not candidates:
+            return None
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        answer = "".join(
+            part.get("text", "") for part in parts
+        ).strip()
+
+        return answer or None
+
+    except Exception as e:
+
+        print(
+            "GEMINI EXCEPTION:",
+            repr(e)
+        )
+
+        return None
+
+
+def is_bot_mentioned(text, bot_username, message=None):
+    """
+    تشخیص منشن ربات در متن پیام. هم حالت @username را بررسی
+    می‌کند و هم entities رسمی پیام (اگر بله آن‌ها را بفرستد).
+    """
+
+    if bot_username:
+
+        if f"@{bot_username}".lower() in (text or "").lower():
+            return True
+
+    if isinstance(message, dict):
+
+        entities = message.get("entities") or []
+
+        for entity in entities:
+
+            if not isinstance(entity, dict):
+                continue
+
+            if entity.get("type") == "mention":
+                return True
+
+    reply_to = (
+        message.get("reply_to_message")
+        if isinstance(message, dict) else None
+    )
+
+    if isinstance(reply_to, dict):
+
+        replied_from = reply_to.get("from") or {}
+
+        bot = get_me()
+
+        if bot and str(replied_from.get("id")) == str(bot.get("id")):
+            return True
+
+    return False
+
+
+def strip_mention(text, bot_username):
+
+    if not bot_username:
+        return text.strip()
+
+    return (
+        text
+        .replace(f"@{bot_username}", "")
+        .strip()
+    )
+
+
+def is_ai_question_message(
+    message,
+    chat_type,
+    bot_id,
+    bot_username,
+    require_mention
+):
+    """
+    تشخیص می‌دهد که آیا این پیام باید توسط هوش مصنوعی پاسخ داده
+    شود یا نه. در گروه فقط وقتی ربات منشن/ریپلای شده باشد؛ در
+    خصوصی همیشه (مگر دستور یا پیام خالی باشد).
+    """
+
+    if not GEMINI_API_KEY:
+        return False
+
+    from_user = message.get("from") or {}
+
+    if from_user.get("is_bot"):
+        return False
+
+    if str(from_user.get("id")) == str(bot_id):
+        return False
+
+    text = (message.get("text") or "").strip()
+
+    if not text:
+        return False
+
+    if text.startswith("/"):
+        return False
+
+    if require_mention:
+
+        if not is_bot_mentioned(text, bot_username, message):
+            return False
+
+    return True
+
+
+def build_ai_prompt(message, bot_username):
+    """
+    اگر پیام ریپلای به پیام دیگری باشد، آن را هم به‌عنوان زمینه
+    به مدل می‌دهیم تا پاسخ دقیق‌تری بدهد. همچنین منشن ربات از
+    متن حذف می‌شود تا وارد سوال نشود.
+    """
+
+    text = strip_mention(
+        (message.get("text") or "").strip(),
+        bot_username
+    )
+
+    reply_to = message.get("reply_to_message")
+
+    if isinstance(reply_to, dict):
+
+        quoted = (reply_to.get("text") or "").strip()
+
+        if quoted:
+
+            return (
+                f"پیام قبلی: {quoted}\n"
+                f"پیام کاربر: {text}"
+            )
+
+    return text
+
+
+def handle_ai_question(
+    message,
+    chat,
+    chat_type,
+    bot_id,
+    bot_username,
+    require_mention
+):
+    """
+    اگر پیام باید توسط هوش مصنوعی پاسخ داده شود (طبق قوانین
+    گروه/خصوصی)، با Gemini پاسخ می‌دهد. خروجی True یعنی پیام
+    پردازش شد.
+    """
+
+    if not is_ai_question_message(
+        message,
+        chat_type,
+        bot_id,
+        bot_username,
+        require_mention
+    ):
+        return False
+
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    prompt = build_ai_prompt(message, bot_username)
+
+    if not prompt:
+        return False
+
+    history = AI_CHAT_HISTORY.get(chat_id, [])
+
+    answer = ask_gemini(prompt, history=history)
+
+    if not answer:
+        return False
+
+    history = history + [
+        {"role": "user", "text": prompt},
+        {"role": "model", "text": answer}
+    ]
+
+    AI_CHAT_HISTORY[chat_id] = history[-AI_MAX_HISTORY:]
+
+    send_message(
+        chat_id,
+        html_text(answer),
+        reply_to_message_id=message_id
+    )
+
+    return True
+
+
+# =========================================================
 # BALE METHODS
 # =========================================================
 
@@ -518,7 +810,8 @@ def send_message(
     chat_id,
     text,
     reply_markup=None,
-    parse_mode="HTML"
+    parse_mode="HTML",
+    reply_to_message_id=None
 ):
 
     data = {
@@ -531,6 +824,9 @@ def send_message(
 
     if parse_mode:
         data["parse_mode"] = parse_mode
+
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
 
     return bale_request(
         "sendMessage",
@@ -2847,6 +3143,40 @@ def process_channel_message(message):
         print(
             "⏭ MESSAGE IS NOT A FORWARD"
         )
+
+        # ---------------------------------------------------
+        # 🤖 اگر این یک فوروارد نبود، شاید یک سوال معمولی از
+        # طرف یکی از اعضای گروه باشد. در این صورت فقط وقتی که
+        # ربات منشن/ریپلای شده باشد با Gemini پاسخ می‌دهیم. این
+        # کار فقط برای گروه/سوپرگروه انجام می‌شود (نه کانال،
+        # چون در کانال فقط ادمین‌ها می‌توانند پیام بگذارند).
+        # ---------------------------------------------------
+
+        if chat_type in ("group", "supergroup"):
+
+            try:
+
+                bot = get_me()
+                bot_id = bot.get("id") if bot else None
+                bot_username = bot.get("username") if bot else None
+
+                handle_ai_question(
+                    message,
+                    chat,
+                    chat_type,
+                    bot_id,
+                    bot_username,
+                    require_mention=True
+                )
+
+            except Exception as e:
+
+                print(
+                    "AI GROUP REPLY ERROR:",
+                    repr(e)
+                )
+
+                traceback.print_exc()
 
         return
 
@@ -5505,6 +5835,40 @@ def process_private_message(message):
             source,
             user_id
         )
+
+        return
+
+    # -----------------------------------------------------
+    # 🤖 پاسخ‌گویی هوشمند (Gemini) در خصوصی
+    #
+    # اگر هیچ‌کدام از موارد بالا (دستور/دکمه/فوروارد مبدأ) این
+    # پیام را مدیریت نکردند، آن را به‌عنوان یک سوال معمولی به
+    # هوش مصنوعی می‌دهیم. در خصوصی نیازی به منشن کردن ربات نیست.
+    # -----------------------------------------------------
+
+    try:
+
+        bot = get_me()
+        bot_id = bot.get("id") if bot else None
+        bot_username = bot.get("username") if bot else None
+
+        handle_ai_question(
+            message,
+            chat,
+            "private",
+            bot_id,
+            bot_username,
+            require_mention=False
+        )
+
+    except Exception as e:
+
+        print(
+            "AI PRIVATE REPLY ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
 
 
 # =========================================================
