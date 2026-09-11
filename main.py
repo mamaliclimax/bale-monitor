@@ -24,6 +24,12 @@ SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
+# پاسخ صوتی: علاوه بر متن، یک پیام صوتی (Text-to-Speech) هم
+# برای پاسخ ساخته و ارسال می‌شود. با ست کردن AI_VOICE_ENABLED=0
+# می‌توان این قابلیت را خاموش کرد (بدون نیاز به تغییر کد).
+AI_VOICE_ENABLED = os.environ.get("AI_VOICE_ENABLED", "1") != "0"
+AI_VOICE_LANG = os.environ.get("AI_VOICE_LANG", "fa")
+
 if not BALE_TOKEN:
     raise Exception("BALE_TOKEN is missing")
 
@@ -658,6 +664,97 @@ def build_ai_prompt(message, bot_username):
     return text
 
 
+def text_to_speech(text, lang=None):
+    """
+    ساخت فایل صوتی mp3 از روی متن با gTTS (رایگان، بدون نیاز به
+    کلید API). در صورت خطا یا نبود کتابخانه، None برمی‌گرداند.
+    فایل موقت ساخته‌شده باید توسط فراخوان حذف شود.
+    """
+
+    if not text or not text.strip():
+        return None
+
+    try:
+
+        from gtts import gTTS
+        import tempfile
+
+        tts = gTTS(
+            text=text,
+            lang=(lang or AI_VOICE_LANG)
+        )
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".mp3",
+            delete=False
+        )
+
+        tts.save(tmp.name)
+
+        return tmp.name
+
+    except ImportError:
+
+        print(
+            "⚠️ gTTS نصب نیست. "
+            "برای پاسخ صوتی: pip install gTTS"
+        )
+
+        return None
+
+    except Exception as e:
+
+        print(
+            "TTS EXCEPTION:",
+            repr(e)
+        )
+
+        return None
+
+
+def send_ai_voice_reply(chat_id, answer, message_id):
+    """
+    ساخت و ارسال نسخه‌ی صوتی پاسخ. فایل موقت بعد از ارسال حذف
+    می‌شود. خطاها فقط لاگ می‌شوند و مانع ارسال پاسخ متنی نمی‌شوند.
+    """
+
+    if not AI_VOICE_ENABLED:
+        return
+
+    voice_path = None
+
+    try:
+
+        voice_path = text_to_speech(answer)
+
+        if not voice_path:
+            return
+
+        send_voice_file(
+            chat_id,
+            voice_path,
+            reply_to_message_id=message_id
+        )
+
+    except Exception as e:
+
+        print(
+            "AI VOICE REPLY ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+    finally:
+
+        if voice_path and os.path.exists(voice_path):
+
+            try:
+                os.remove(voice_path)
+            except Exception:
+                pass
+
+
 def handle_ai_question(
     message,
     chat,
@@ -668,8 +765,8 @@ def handle_ai_question(
 ):
     """
     اگر پیام باید توسط هوش مصنوعی پاسخ داده شود (طبق قوانین
-    گروه/خصوصی)، با Gemini پاسخ می‌دهد. خروجی True یعنی پیام
-    پردازش شد.
+    گروه/خصوصی)، با Gemini پاسخ می‌دهد (متن + صوت). خروجی True
+    یعنی پیام پردازش شد.
     """
 
     if not is_ai_question_message(
@@ -707,6 +804,12 @@ def handle_ai_question(
         chat_id,
         html_text(answer),
         reply_to_message_id=message_id
+    )
+
+    send_ai_voice_reply(
+        chat_id,
+        answer,
+        message_id
     )
 
     return True
@@ -804,6 +907,79 @@ def forward_message(
             "message_id": message_id
         }
     )
+
+
+def send_voice_file(
+    chat_id,
+    file_path,
+    caption=None,
+    reply_to_message_id=None
+):
+    """
+    ارسال یک فایل صوتی (mp3) به‌عنوان پیام صوتی/آهنگ. برخلاف
+    sendMessage این متد باید multipart/form-data باشد، پس از
+    bale_request (که فقط JSON می‌فرستد) استفاده نمی‌کنیم.
+    """
+
+    url = f"{BALE_API}/sendAudio"
+
+    data = {
+        "chat_id": str(chat_id)
+    }
+
+    if caption:
+        data["caption"] = caption
+
+    if reply_to_message_id:
+        data["reply_to_message_id"] = reply_to_message_id
+
+    try:
+
+        with open(file_path, "rb") as f:
+
+            response = requests.post(
+                url,
+                data=data,
+                files={"audio": f},
+                timeout=60
+            )
+
+        print(
+            "BALE sendAudio:",
+            response.status_code
+        )
+
+        try:
+            result = response.json()
+
+        except Exception:
+
+            print(
+                "BALE sendAudio RAW:",
+                response.text[:2000]
+            )
+
+            return None
+
+        if not result.get("ok"):
+
+            print(
+                "BALE sendAudio ERROR:",
+                result
+            )
+
+            return None
+
+        return result.get("result")
+
+    except Exception as e:
+
+        print(
+            "BALE sendAudio EXCEPTION:",
+            repr(e)
+        )
+
+        return None
 
 
 def send_message(
