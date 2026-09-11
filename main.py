@@ -1512,7 +1512,15 @@ def sync_channels():
 
             if not member:
 
+                # 🔧 خطای getChatMember نباید باعث شود کانال را
+                # از گزارش‌گیری خارج کنیم. ممکن است کانال خصوصی
+                # باشد یا API بله وضعیت عضویت را برنگرداند؛ اما اگر
+                # channel_post واقعاً به ربات برسد، باید ثبت شود.
                 errors += 1
+                print(
+                    "⚠️ SYNC MEMBERSHIP UNKNOWN - KEEP CHANNEL:",
+                    chat_id
+                )
                 continue
 
             status = str(
@@ -1530,6 +1538,8 @@ def sync_channels():
                 "kicked"
             ):
 
+                # وضعیت عضویت برای مدیریت لیست نگه داشته می‌شود،
+                # اما رکوردهای قبلی reposts هرگز حذف/فیلتر نمی‌شوند.
                 update_channel_row(
                     row["id"],
                     {
@@ -1843,22 +1853,6 @@ def extract_forward(message):
             source_message_id = (
                 origin_message.get("message_id")
             )
-
-    # برخی نسخه‌های API بله شناسه پیام فورواردشده را با کلیدهای
-    # متفاوت یا داخل forward_origin ارسال می‌کنند.
-    if not source_message_id and isinstance(forward_origin, dict):
-        for key in ("origin_message_id", "source_message_id", "post_id", "id"):
-            value = forward_origin.get(key)
-            if value is not None:
-                source_message_id = value
-                break
-
-    if not source_message_id:
-        for key in ("forward_message_id", "forwarded_message_id", "forward_from_message_id"):
-            value = message.get(key)
-            if value is not None:
-                source_message_id = value
-                break
 
     if source_chat_id is None:
 
@@ -2800,35 +2794,18 @@ def process_channel_message(message):
         return
 
     # -----------------------------------------------------
-    # وضعیت مقصد
+    # 🔧 اصلاح مهم: ثبت بازنشر نباید به وضعیت active / bot_member
+    # / manually_disabled وابسته باشد.
+    # اگر بله یک channel_post را به ربات تحویل داده باشد، همان
+    # آپدیت معتبر است و باید بازنشر ثبت شود؛ حتی اگر کانال خصوصی
+    # باشد یا ربات ادمین نباشد. وضعیت عضویت فقط برای مدیریت لیست
+    # کانال‌هاست و نباید باعث حذف رکورد بازنشر شود.
     # -----------------------------------------------------
 
-    if row.get("active") is not True:
-
-        print(
-            "⏭ DESTINATION NOT ACTIVE:",
-            chat_id
-        )
-
-        return
-
-    if row.get("bot_member") is False:
-
-        print(
-            "⏭ BOT IS NOT MEMBER:",
-            chat_id
-        )
-
-        return
-
-    if row.get("manually_disabled") is True:
-
-        print(
-            "⏭ DESTINATION MANUALLY DISABLED:",
-            chat_id
-        )
-
-        return
+    print(
+        "✅ PROCESSING RECEIVED CHANNEL POST WITHOUT MEMBERSHIP GATE:",
+        chat_id
+    )
 
     # -----------------------------------------------------
     # مقصد
@@ -3355,10 +3332,14 @@ def get_reposts_for_selected_source(
 
         return source, []
 
-    # گزارش باید تمام بازنشرهای واقعاً ثبت‌شده را نشان دهد.
-    # قبلاً بازنشرها بر اساس فعال بودن فعلی کانال فیلتر می‌شدند؛
-    # در نتیجه ممکن بود رکورد درست در جدول reposts وجود داشته باشد
-    # اما گزارش «هیچ بازنشری پیدا نشد» نمایش دهد.
+    # -----------------------------------------------------
+    # 🔧 اصلاح مهم گزارش:
+    # گزارش باید تمام بازنشرهای ثبت‌شده را نشان دهد.
+    # قبلاً فقط مقصدهای active نمایش داده می‌شدند؛ بنابراین اگر
+    # کانال خصوصی بود، bot_member اشتباه ثبت شده بود، یا sync آن
+    # را inactive کرده بود، رکورد واقعی از گزارش حذف می‌شد.
+    # -----------------------------------------------------
+
     print(
         "📊 REPORT ROWS FOUND:",
         len(rows),
