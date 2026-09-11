@@ -28,7 +28,9 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 # برای پاسخ ساخته و ارسال می‌شود. با ست کردن AI_VOICE_ENABLED=0
 # می‌توان این قابلیت را خاموش کرد (بدون نیاز به تغییر کد).
 AI_VOICE_ENABLED = os.environ.get("AI_VOICE_ENABLED", "1") != "0"
-AI_VOICE_LANG = os.environ.get("AI_VOICE_LANG", "fa")
+# نام صدای Microsoft Edge TTS. لیست صداهای فارسی:
+# fa-IR-DilaraNeural (زن) و fa-IR-FaridNeural (مرد)
+AI_VOICE_NAME = os.environ.get("AI_VOICE_NAME", "fa-IR-DilaraNeural")
 
 if not BALE_TOKEN:
     raise Exception("BALE_TOKEN is missing")
@@ -664,11 +666,13 @@ def build_ai_prompt(message, bot_username):
     return text
 
 
-def text_to_speech(text, lang=None):
+def text_to_speech(text, voice=None):
     """
-    ساخت فایل صوتی mp3 از روی متن با gTTS (رایگان، بدون نیاز به
-    کلید API). در صورت خطا یا نبود کتابخانه، None برمی‌گرداند.
-    فایل موقت ساخته‌شده باید توسط فراخوان حذف شود.
+    ساخت فایل صوتی mp3 از روی متن با edge-tts (رایگان، بدون
+    نیاز به کلید API، از موتور Microsoft Edge استفاده می‌کند و
+    برخلاف gTTS از زبان فارسی هم پشتیبانی می‌کند). در صورت خطا
+    یا نبود کتابخانه، None برمی‌گرداند. فایل موقت ساخته‌شده باید
+    توسط فراخوان حذف شود.
     """
 
     if not text or not text.strip():
@@ -676,28 +680,35 @@ def text_to_speech(text, lang=None):
 
     try:
 
-        from gtts import gTTS
+        import asyncio
         import tempfile
-
-        tts = gTTS(
-            text=text,
-            lang=(lang or AI_VOICE_LANG)
-        )
+        import edge_tts
 
         tmp = tempfile.NamedTemporaryFile(
             suffix=".mp3",
             delete=False
         )
 
-        tts.save(tmp.name)
+        tmp.close()
+
+        async def _synthesize():
+
+            communicate = edge_tts.Communicate(
+                text,
+                voice or AI_VOICE_NAME
+            )
+
+            await communicate.save(tmp.name)
+
+        asyncio.run(_synthesize())
 
         return tmp.name
 
     except ImportError:
 
         print(
-            "⚠️ gTTS نصب نیست. "
-            "برای پاسخ صوتی: pip install gTTS"
+            "⚠️ edge-tts نصب نیست. "
+            "برای پاسخ صوتی: pip install edge-tts"
         )
 
         return None
