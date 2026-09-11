@@ -1844,6 +1844,22 @@ def extract_forward(message):
                 origin_message.get("message_id")
             )
 
+    # برخی نسخه‌های API بله شناسه پیام فورواردشده را با کلیدهای
+    # متفاوت یا داخل forward_origin ارسال می‌کنند.
+    if not source_message_id and isinstance(forward_origin, dict):
+        for key in ("origin_message_id", "source_message_id", "post_id", "id"):
+            value = forward_origin.get(key)
+            if value is not None:
+                source_message_id = value
+                break
+
+    if not source_message_id:
+        for key in ("forward_message_id", "forwarded_message_id", "forward_from_message_id"):
+            value = message.get(key)
+            if value is not None:
+                source_message_id = value
+                break
+
     if source_chat_id is None:
 
         print(
@@ -3339,42 +3355,19 @@ def get_reposts_for_selected_source(
 
         return source, []
 
-    # -----------------------------------------------------
-    # فقط مقصدهای فعال
-    # -----------------------------------------------------
+    # گزارش باید تمام بازنشرهای واقعاً ثبت‌شده را نشان دهد.
+    # قبلاً بازنشرها بر اساس فعال بودن فعلی کانال فیلتر می‌شدند؛
+    # در نتیجه ممکن بود رکورد درست در جدول reposts وجود داشته باشد
+    # اما گزارش «هیچ بازنشری پیدا نشد» نمایش دهد.
+    print(
+        "📊 REPORT ROWS FOUND:",
+        len(rows),
+        "FOR SOURCE:",
+        source.get("channel_id"),
+        source.get("message_id")
+    )
 
-    active_channels = get_active_channels()
-
-    active_ids = set()
-
-    for row in active_channels:
-
-        chat_id = row.get(
-            "chat_id"
-        )
-
-        if chat_id is not None:
-
-            active_ids.add(
-                str(chat_id)
-            )
-
-    filtered = []
-
-    for row in rows:
-
-        destination_id = row.get(
-            "destination_channel_id"
-        )
-
-        if destination_id is None:
-            continue
-
-        if str(destination_id) in active_ids:
-
-            filtered.append(row)
-
-    return source, filtered
+    return source, rows
 
 
 # =========================================================
