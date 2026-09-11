@@ -881,7 +881,7 @@ def generate_pollinations_image(prompt):
 
         url = (
             f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?width=1024&height=1024&nologo=true"
+            f"?width=1024&height=1024&nologo=true&safe=true"
         )
 
         response = requests.get(url, timeout=90)
@@ -987,6 +987,45 @@ def send_photo_file(
         return None
 
 
+def is_image_prompt_safe(prompt):
+    """
+    بررسی می‌کند که آیا توضیح عکس مناسب و بدون محتوای نامناسب
+    (جنسی/خشونت‌آمیز/غیرقانونی و...) است یا نه. از Gemini برای
+    این تشخیص استفاده می‌شود. اگر Gemini در دسترس نباشد یا خطا
+    بدهد، به‌صورت پیش‌فرض اجازه می‌دهد (فیلتر safe=true خودِ
+    Pollinations به‌عنوان لایه‌ی اول همچنان فعال است).
+    """
+
+    if not GEMINI_API_KEY:
+        return True
+
+    check_prompt = (
+        "این توضیح عکس را بررسی کن و فقط با یک کلمه‌ی «SAFE» یا "
+        "«UNSAFE» جواب بده (بدون هیچ توضیح اضافه). اگر توضیح شامل "
+        "محتوای جنسی/برهنگی، خشونت شدید، آزار کودکان، نفرت‌پراکنی "
+        "یا محتوای غیرقانونی باشد UNSAFE بنویس، در غیر این صورت "
+        f"SAFE بنویس.\n\nتوضیح عکس: {prompt}"
+    )
+
+    try:
+
+        result = ask_gemini(check_prompt)
+
+        if not result:
+            return True
+
+        return "unsafe" not in result.strip().lower()
+
+    except Exception as e:
+
+        print(
+            "IMAGE MODERATION EXCEPTION:",
+            repr(e)
+        )
+
+        return True
+
+
 def handle_image_command(message, chat, bot_username):
     """
     اگر پیام دستور ساخت عکس باشد (/image یا /عکس)، عکس را با
@@ -1010,6 +1049,16 @@ def handle_image_command(message, chat, bot_username):
             chat_id,
             "لطفاً بعد از دستور، توضیح عکس مورد نظرت را بنویس.\n"
             "مثال: /image یک گربه فضانورد",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
+    if not is_image_prompt_safe(prompt):
+
+        send_message(
+            chat_id,
+            "🚫 این درخواست مناسب ساخت عکس نیست. لطفاً توضیح دیگه‌ای بنویس.",
             reply_to_message_id=message_id
         )
 
