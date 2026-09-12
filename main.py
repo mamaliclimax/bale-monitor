@@ -35,6 +35,23 @@ AI_VOICE_ENABLED = os.environ.get("AI_VOICE_ENABLED", "1") != "0"
 # fa-IR-DilaraNeural (زن) و fa-IR-FaridNeural (مرد)
 AI_VOICE_NAME = os.environ.get("AI_VOICE_NAME", "fa-IR-DilaraNeural")
 
+# تبدیل «متن خبر» به صوت با موتور Google AI Studio (Gemini TTS).
+# این قابلیت مستقل از AI_VOICE_ENABLED (که برای پاسخ سوالات است)
+# با دستور /voice یا /خبر در خصوصی فعال می‌شود و برخلاف پاسخ AI،
+# متن ورودی کاربر عیناً (بدون بازنویسی) خوانده می‌شود.
+GEMINI_TTS_MODEL = os.environ.get(
+    "GEMINI_TTS_MODEL",
+    "gemini-3.1-flash-tts-preview"
+)
+# لیست صداهای آماده‌ی Gemini TTS: Aoede, Puck, Charon, Kore,
+# Fenrir, Zephyr, Leda, Orus و... (مدل چندزبانه است و فارسی را
+# هم از روی متن ورودی تشخیص می‌دهد).
+GEMINI_TTS_VOICE = os.environ.get("GEMINI_TTS_VOICE", "Aoede")
+# حداکثر طول متن خبر (کاراکتر) برای جلوگیری از هزینه/خطای زیاد
+GEMINI_TTS_MAX_CHARS = int(
+    os.environ.get("GEMINI_TTS_MAX_CHARS", "4000")
+)
+
 if not BALE_TOKEN:
     raise Exception("BALE_TOKEN is missing")
 
@@ -51,6 +68,10 @@ BALE_API = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
 GEMINI_API_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_MODEL}:generateContent"
+)
+GEMINI_TTS_API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_TTS_MODEL}:generateContent"
 )
 
 supabase = create_client(
@@ -842,6 +863,346 @@ def handle_ai_question(
         answer,
         message_id
     )
+
+    return True
+
+
+# =========================================================
+# NEWS TO VOICE (Google AI Studio / Gemini TTS)
+#
+# قابلیت مستقل از چت هوش مصنوعی بالا: کاربر با دستور /voice یا
+# /خبر (در خصوصی) متن خبر را می‌فرستد یا فوروارد می‌کند و ربات
+# دقیقاً همان متن را (بدون پاسخ‌گویی/بازنویسی توسط AI) با موتور
+# Gemini TTS به صوت تبدیل کرده و به‌صورت فایل صوتی زیر همان
+# پیام ارسال می‌کند.
+# =========================================================
+
+NEWS_VOICE_COMMANDS = ("/voice", "/خبر", "/news")
+
+
+def get_news_text_from_command(text, bot_username):
+    """
+    اگر پیام با یکی از دستورات خبر-به-صوت شروع شده باشد، متن
+    خبر را استخراج می‌کند (هر چه بعد از دستور آمده). اگر فقط
+    خودِ دستور فرستاده شده باشد، رشته‌ی خالی برمی‌گرداند (یعنی
+    باید در پیام بعدی از کاربر متن خبر را بگیریم). اگر پیام اصلاً
+    با این دستورها شروع نشده، None برمی‌گرداند.
+    """
+
+    if not text:
+        return None
+
+    stripped = text.strip()
+
+    first_word = stripped.split(" ", 1)[0]
+    rest = (
+        stripped.split(" ", 1)[1]
+        if " " in stripped else ""
+    ).strip()
+
+    if bot_username and "@" in first_word:
+        first_word = first_word.split("@", 1)[0]
+
+    if first_word.lower() not in NEWS_VOICE_COMMANDS:
+        return None
+
+    return rest
+
+
+def parse_pcm_mime_type(mime_type):
+    """
+    از مقدار mimeType خروجی Gemini TTS (مثل
+    "audio/L16;codec=pcm;rate=24000") نرخ نمونه‌برداری را
+    استخراج می‌کند. در صورت نبود، مقدار پیش‌فرض ۲۴۰۰۰ برمی‌گردد.
+    """
+
+    sample_rate = 24000
+
+    if mime_type:
+
+        for part in str(mime_type).split(";"):
+
+            part = part.strip()
+
+            if part.lower().startswith("rate="):
+
+                try:
+                    sample_rate = int(part.split("=", 1)[1])
+                except Exception:
+                    pass
+
+    return sample_rate
+
+
+def gemini_text_to_speech(text, voice=None):
+    """
+    ساخت فایل صوتی wav از روی متن با Gemini TTS (Google AI
+    Studio). برخلاف edge-tts نیاز به کلید GEMINI_API_KEY دارد و
+    هزینه‌بر است (طبق تعرفه‌ی گوگل). در صورت نبود کلید یا خطا،
+    None برمی‌گرداند. فایل موقت ساخته‌شده باید توسط فراخوان حذف
+    شود.
+    """
+
+    if not GEMINI_API_KEY:
+        return None
+
+    if not text or not text.strip():
+        return None
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": text.strip()}]
+            }
+        ],
+        "generation_config": {
+            "response_modalities": ["AUDIO"],
+            "speech_config": {
+                "voice_config": {
+                    "prebuilt_voice_config": {
+                        "voice_name": voice or GEMINI_TTS_VOICE
+                    }
+                }
+            }
+        }
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
+    try:
+
+        response = requests.post(
+            GEMINI_TTS_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=90
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "GEMINI TTS ERROR:",
+                response.status_code,
+                response.text[:500]
+            )
+
+            return None
+
+        data = response.json()
+
+        candidates = data.get("candidates") or []
+
+        if not candidates:
+            return None
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        inline_data = None
+
+        for part in parts:
+
+            inline_data = (
+                part.get("inlineData")
+                or part.get("inline_data")
+            )
+
+            if inline_data:
+                break
+
+        if not inline_data:
+            return None
+
+        audio_b64 = (
+            inline_data.get("data")
+        )
+
+        mime_type = (
+            inline_data.get("mimeType")
+            or inline_data.get("mime_type")
+        )
+
+        if not audio_b64:
+            return None
+
+        import base64
+        import wave
+
+        pcm_bytes = base64.b64decode(audio_b64)
+        sample_rate = parse_pcm_mime_type(mime_type)
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".wav",
+            delete=False
+        )
+
+        tmp.close()
+
+        with wave.open(tmp.name, "wb") as wf:
+
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_bytes)
+
+        return tmp.name
+
+    except Exception as e:
+
+        print(
+            "GEMINI TTS EXCEPTION:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+        return None
+
+
+def process_news_to_voice(chat_id, message_id, news_text):
+    """
+    گرفتن متن خبر، ساخت صوت با Gemini TTS و ارسال آن به‌عنوان
+    فایل صوتی، زیر همان پیام. پیام‌های وضعیت (در حال ساخت/خطا)
+    نیز ارسال می‌شوند.
+    """
+
+    news_text = (news_text or "").strip()
+
+    if not news_text:
+
+        send_message(
+            chat_id,
+            "لطفاً متن خبر را بفرست یا پست خبر را Forward کن.\n\n"
+            "مثال: <code>/voice متن خبر اینجا</code>\n"
+            "یا فقط <code>/voice</code> بفرست و بعد متن/فوروارد "
+            "خبر را ارسال کن.",
+            reply_to_message_id=message_id
+        )
+
+        return
+
+    if not GEMINI_API_KEY:
+
+        send_message(
+            chat_id,
+            "⚠️ کلید GEMINI_API_KEY تنظیم نشده، این قابلیت غیرفعال است.",
+            reply_to_message_id=message_id
+        )
+
+        return
+
+    if len(news_text) > GEMINI_TTS_MAX_CHARS:
+
+        send_message(
+            chat_id,
+            "⚠️ متن خبر خیلی طولانی است "
+            f"(حداکثر {to_persian_digits(GEMINI_TTS_MAX_CHARS)} کاراکتر). "
+            "لطفاً کوتاه‌ترش کن.",
+            reply_to_message_id=message_id
+        )
+
+        return
+
+    send_message(
+        chat_id,
+        "🎙 در حال تبدیل خبر به صوت...",
+        reply_to_message_id=message_id
+    )
+
+    voice_path = None
+
+    try:
+
+        voice_path = gemini_text_to_speech(news_text)
+
+        if not voice_path:
+
+            send_message(
+                chat_id,
+                "متاسفانه در ساخت صوت خطایی پیش اومد، دوباره امتحان کن.",
+                reply_to_message_id=message_id
+            )
+
+            return
+
+        send_voice_file(
+            chat_id,
+            voice_path,
+            reply_to_message_id=message_id
+        )
+
+    except Exception as e:
+
+        print(
+            "NEWS TO VOICE ERROR:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+    finally:
+
+        if voice_path and os.path.exists(voice_path):
+
+            try:
+                os.remove(voice_path)
+            except Exception:
+                pass
+
+
+def handle_voice_command(message, chat, bot_username):
+    """
+    اگر پیام دستور خبر-به-صوت باشد (/voice، /خبر یا /news)، آن
+    را مدیریت می‌کند: یا بلافاصله متن همراه دستور را به صوت
+    تبدیل می‌کند، یا (اگر متنی همراه دستور نبود) منتظر پیام بعدی
+    (متن یا فوروارد) می‌ماند. خروجی True یعنی پیام پردازش شد.
+    """
+
+    text = (message.get("text") or "").strip()
+
+    news_text = get_news_text_from_command(text, bot_username)
+
+    if news_text is None:
+        return False
+
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    from_user = message.get("from") or {}
+    requester_id = from_user.get("id")
+
+    if not is_ai_allowed(requester_id):
+
+        send_message(
+            chat_id,
+            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
+    if not news_text:
+
+        PENDING_ACTIONS[str(chat_id)] = "await_news_voice"
+
+        send_message(
+            chat_id,
+            "🎙 <b>خبر به صوت</b>\n\n"
+            "متن خبر را بفرست یا پست خبر را Forward کن تا "
+            "تبدیل به صوت شود.\n\n"
+            "برای انصراف /cancel را بفرستید."
+        )
+
+        return True
+
+    process_news_to_voice(chat_id, message_id, news_text)
 
     return True
 
@@ -7291,6 +7652,39 @@ def handle_pending_action(
         )
 
     # -----------------------------------------------------
+    # خبر به صوت - منتظر متن/فوروارد خبر
+    #
+    # ممکن است پیام فوروارد شده باشد (بدون تایپ مستقیم)، پس
+    # مستقیماً از message.get("text") می‌خوانیم که در پیام‌های
+    # فوروارد شده هم همان متن اصلی را دارد.
+    # -----------------------------------------------------
+
+    if action == "await_news_voice":
+
+        news_text = (message.get("text") or "").strip()
+
+        if not news_text:
+
+            send_message(
+                chat_id,
+                "❌ متنی پیدا نشد. لطفاً متن خبر را بفرست یا "
+                "پست خبر را Forward کن.\n\n"
+                "برای انصراف /cancel را بفرستید."
+            )
+
+            return True
+
+        PENDING_ACTIONS.pop(key, None)
+
+        process_news_to_voice(
+            chat_id,
+            message.get("message_id"),
+            news_text
+        )
+
+        return True
+
+    # -----------------------------------------------------
     # گزارش مبدأ و مقصد - مرحله‌ی اول: شناسایی مبدأ
     #
     # ممکن است با Forward یک پست (بدون متن) انجام شود، پس
@@ -7593,6 +7987,34 @@ def process_private_message(message):
         message.get("text")
         or ""
     ).strip()
+
+    # -----------------------------------------------------
+    # VOICE COMMAND (خبر به صوت: /voice، /خبر یا /news)
+    #
+    # 🔧 این بررسی باید قبل از handle_command باشد: handle_command
+    # هر دستور ناشناخته را برای کاربران غیرمدیر (حتی اگر در
+    # ai_allowed_users باشند، مثل /image) رد می‌کند. /voice هم
+    # باید طبق همان منطق «دسترسی هوش مصنوعی» (نه صرفاً مدیر)
+    # کنترل شود، پس پیش از دستورات مدیریتی بررسی می‌شود.
+    # -----------------------------------------------------
+
+    if text.startswith("/"):
+
+        try:
+
+            bot = get_me()
+            bot_username = bot.get("username") if bot else None
+
+        except Exception:
+
+            bot_username = None
+
+        if handle_voice_command(
+            message,
+            chat,
+            bot_username
+        ):
+            return
 
     # -----------------------------------------------------
     # COMMAND
