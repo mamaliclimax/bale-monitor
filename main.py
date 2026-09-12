@@ -1650,6 +1650,356 @@ def handle_image_command(message, chat, bot_username):
 
 
 # =========================================================
+# TEXT TOOLS: خلاصه + بازنویسی (سه سبک)
+# =========================================================
+
+SUMMARY_COMMANDS = ("/خلاصه", "/summary", "/summarize")
+
+# سبک‌های بازنویسی
+# کلید = شناسه داخلی ، مقدار = (لیست دستورات/عبارات، system prompt)
+REWRITE_STYLES = {
+    "default": {
+        "commands": ("/بازنویس", "/rewrite"),
+        "label": "عادی",
+        "system": (
+            "متن زیر را به فارسی روان، طبیعی و خوانا بازنویسی کن. "
+            "معنا و اطلاعات اصلی را حفظ کن، فقط بیان را بهتر و روان‌تر کن. "
+            "هیچ توضیح اضافه‌ای ننویس؛ فقط متن بازنویسی‌شده را برگردان."
+        ),
+    },
+    "pr": {
+        "commands": (
+            "/بازنویس روابط عمومی",
+            "/بازنویس_روابط_عمومی",
+            "/بازنویس_pr",
+            "/rewrite_pr",
+        ),
+        "label": "روابط عمومی",
+        "system": (
+            "متن زیر را به سبک روابط عمومی و رسمی سازمانی بازنویسی کن. "
+            "لحن حرفه‌ای، محترمانه، مثبت و مناسب انتشار عمومی باشد. "
+            "از اغراق غیرواقعی پرهیز کن و اطلاعات اصلی را حفظ کن. "
+            "هیچ توضیح اضافه‌ای ننویس؛ فقط متن بازنویسی‌شده را برگردان."
+        ),
+    },
+    "psycho": {
+        "commands": (
+            "/بازنویس روان‌شناسانه",
+            "/بازنویس روانشناسانه",
+            "/بازنویس_روانشناسانه",
+            "/بازنویس_روان‌شناسانه",
+            "/rewrite_psycho",
+        ),
+        "label": "روان‌شناسانه (مخاطب عموم)",
+        "system": (
+            "متن زیر را به زبانی همدلانه، آرام و قابل‌فهم برای مخاطب عموم "
+            "بازنویسی کن (سبک روان‌شناسانه و حمایتی). "
+            "لحن گرم، بدون قضاوت و مناسب ارتباط مؤثر باشد. "
+            "اطلاعات اصلی را حفظ کن و هیچ توضیح اضافه‌ای ننویس؛ "
+            "فقط متن بازنویسی‌شده را برگردان."
+        ),
+    },
+}
+
+
+def _extract_command_and_rest(text, bot_username):
+    """اولین کلمه دستور را (با حذف @bot) و بقیه متن را برمی‌گرداند."""
+    if not text:
+        return None, ""
+
+    stripped = text.strip()
+    first = stripped.split(" ", 1)[0]
+    rest = stripped.split(" ", 1)[1].strip() if " " in stripped else ""
+
+    if bot_username and "@" in first:
+        first = first.split("@", 1)[0]
+
+    return first, rest
+
+
+def get_text_from_message_or_reply(message, command_rest):
+    """
+    متن هدف را از بقیه دستور، یا از پیام ریپلای‌شده،
+    یا از کپشن/متن فوروارد استخراج می‌کند.
+    """
+    if command_rest and command_rest.strip():
+        return command_rest.strip()
+
+    reply = message.get("reply_to_message") or {}
+    if reply:
+        t = (reply.get("text") or reply.get("caption") or "").strip()
+        if t:
+            return t
+
+    # فوروارد مستقیم روی خود پیام
+    t = (message.get("text") or message.get("caption") or "").strip()
+    # اگر فقط دستور بوده، خالی برگردان
+    return None
+
+
+def ask_gemini_with_system(system_prompt, user_text):
+    """
+    یک بار Gemini را با system_instruction دلخواه صدا می‌زند
+    (بدون تاریخچه چت). برای خلاصه و بازنویسی مناسب است.
+    """
+    if not GEMINI_API_KEY:
+        return None
+
+    if not user_text or not user_text.strip():
+        return None
+
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": system_prompt}]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_text.strip()}]
+            }
+        ]
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
+    try:
+        response = requests.post(
+            GEMINI_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=50
+        )
+
+        if response.status_code != 200:
+            print(
+                "GEMINI TEXT-TOOL ERROR:",
+                response.status_code,
+                response.text[:500]
+            )
+            return None
+
+        data = response.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        answer = "".join(p.get("text", "") for p in parts).strip()
+        return answer or None
+
+    except Exception as e:
+        print("GEMINI TEXT-TOOL EXCEPTION:", repr(e))
+        traceback.print_exc()
+        return None
+
+
+def handle_summary_command(message, chat, bot_username):
+    """
+    /خلاصه یا /summary
+    متن را از ریپلای یا بعد از دستور می‌گیرد و خلاصه می‌کند.
+    """
+    text = (message.get("text") or "").strip()
+    first, rest = _extract_command_and_rest(text, bot_username)
+
+    if not first or first.lower() not in [c.lower() for c in SUMMARY_COMMANDS]:
+        # پشتیبانی از حالت «/خلاصه 20» — عدد را نادیده می‌گیریم
+        # و فقط خود دستور را چک می‌کنیم
+        base = first.lower() if first else ""
+        if base not in ("/خلاصه", "/summary", "/summarize"):
+            return False
+
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    from_user = message.get("from") or {}
+    requester_id = from_user.get("id")
+
+    if not is_ai_allowed(requester_id):
+        send_message(
+            chat_id,
+            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    # اگر rest فقط عدد باشد (مثل /خلاصه 20) آن را متن ندان
+    target = rest
+    if target and target.strip().isdigit():
+        target = ""
+
+    source_text = get_text_from_message_or_reply(message, target)
+
+    if not source_text:
+        send_message(
+            chat_id,
+            "لطفاً متن را بعد از دستور بنویس یا روی پیام موردنظر "
+            "<b>ریپلای</b> کن و بگو /خلاصه\n\n"
+            "مثال:\n"
+            "• ریپلای روی یک پست + <code>/خلاصه</code>\n"
+            "• <code>/خلاصه متن طولانی اینجا...</code>",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    if len(source_text) < 20:
+        send_message(
+            chat_id,
+            "متن خیلی کوتاه است؛ برای خلاصه‌سازی به متن بلندتری نیاز دارم.",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    send_message(
+        chat_id,
+        "⏳ در حال خلاصه‌سازی...",
+        reply_to_message_id=message_id
+    )
+
+    system = (
+        "متن زیر را به فارسی خلاصه کن. "
+        "خلاصه باید کوتاه، واضح و شامل نکات اصلی باشد. "
+        "از بولت‌پوینت در صورت مناسب بودن استفاده کن. "
+        "هیچ مقدمه یا توضیح اضافه‌ای ننویس."
+    )
+
+    summary = ask_gemini_with_system(system, source_text)
+
+    if not summary:
+        send_message(
+            chat_id,
+            "متاسفانه در خلاصه‌سازی خطایی پیش آمد. دوباره امتحان کن.",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    send_message(
+        chat_id,
+        f"📝 <b>خلاصه:</b>\n\n{html_text(summary)}",
+        reply_to_message_id=message_id
+    )
+    return True
+
+
+def detect_rewrite_style(text, bot_username):
+    """
+    تشخیص سبک بازنویسی از روی متن دستور.
+    برمی‌گرداند: (style_key, rest_text) یا (None, None)
+    اول سبک‌های چندکلمه‌ای را چک می‌کند تا با /بازنویس ساده تداخل نکند.
+    """
+    if not text:
+        return None, None
+
+    stripped = text.strip()
+    lower = stripped.lower()
+
+    # حذف @bot از اول دستور اگر باشد
+    # برای تطبیق دقیق‌تر، اول سبک‌های خاص را امتحان می‌کنیم
+    for key in ("pr", "psycho", "default"):
+        style = REWRITE_STYLES[key]
+        for cmd in style["commands"]:
+            cmd_l = cmd.lower()
+            # حالت دقیق یا با @bot
+            if lower == cmd_l or lower.startswith(cmd_l + " "):
+                rest = stripped[len(cmd):].strip()
+                # اگر با @bot آمده باشد
+                if rest.startswith("@"):
+                    # /بازنویس@bot ...
+                    parts = rest.split(" ", 1)
+                    rest = parts[1].strip() if len(parts) > 1 else ""
+                return key, rest
+
+            # حالت /بازنویس@username ...
+            if bot_username:
+                with_bot = cmd_l + "@" + bot_username.lower()
+                if lower == with_bot or lower.startswith(with_bot + " "):
+                    rest = stripped[len(cmd) + 1 + len(bot_username):].strip()
+                    return key, rest
+
+    return None, None
+
+
+def handle_rewrite_command(message, chat, bot_username):
+    """
+    سه سبک بازنویسی:
+      /بازنویس
+      /بازنویس روابط عمومی
+      /بازنویس روان‌شناسانه
+    متن از ریپلای یا بعد از دستور گرفته می‌شود.
+    """
+    text = (message.get("text") or "").strip()
+    style_key, rest = detect_rewrite_style(text, bot_username)
+
+    if style_key is None:
+        return False
+
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    from_user = message.get("from") or {}
+    requester_id = from_user.get("id")
+
+    if not is_ai_allowed(requester_id):
+        send_message(
+            chat_id,
+            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    source_text = get_text_from_message_or_reply(message, rest)
+
+    if not source_text:
+        style = REWRITE_STYLES[style_key]
+        send_message(
+            chat_id,
+            f"لطفاً متن را بعد از دستور بنویس یا روی پیام موردنظر "
+            f"<b>ریپلای</b> کن.\n\n"
+            f"سبک فعلی: <b>{style['label']}</b>\n\n"
+            f"مثال‌ها:\n"
+            f"• ریپلای + <code>/بازنویس</code>\n"
+            f"• ریپلای + <code>/بازنویس روابط عمومی</code>\n"
+            f"• ریپلای + <code>/بازنویس روان‌شناسانه</code>\n"
+            f"• <code>/بازنویس متن اینجا...</code>",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    if len(source_text) < 5:
+        send_message(
+            chat_id,
+            "متن خیلی کوتاه است.",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    style = REWRITE_STYLES[style_key]
+
+    send_message(
+        chat_id,
+        f"⏳ در حال بازنویسی ({style['label']})...",
+        reply_to_message_id=message_id
+    )
+
+    result = ask_gemini_with_system(style["system"], source_text)
+
+    if not result:
+        send_message(
+            chat_id,
+            "متاسفانه در بازنویسی خطایی پیش آمد. دوباره امتحان کن.",
+            reply_to_message_id=message_id
+        )
+        return True
+
+    send_message(
+        chat_id,
+        f"✏️ <b>بازنویسی — {style['label']}</b>\n\n{html_text(result)}",
+        reply_to_message_id=message_id
+    )
+    return True
+
+
+# =========================================================
 # BALE METHODS
 # =========================================================
 
@@ -4439,6 +4789,20 @@ def process_channel_message(message):
                 # 🖼 دستور ساخت عکس (/image یا /عکس) در گروه به
                 # مانند سایر دستورات، بدون نیاز به منشن کار می‌کند.
                 if handle_image_command(
+                    message,
+                    chat,
+                    bot_username
+                ):
+                    return
+
+                if handle_summary_command(
+                    message,
+                    chat,
+                    bot_username
+                ):
+                    return
+
+                if handle_rewrite_command(
                     message,
                     chat,
                     bot_username
@@ -8186,6 +8550,20 @@ def process_private_message(message):
             bot_username = None
 
         if handle_image_command(
+            message,
+            chat,
+            bot_username
+        ):
+            return
+
+        if handle_summary_command(
+            message,
+            chat,
+            bot_username
+        ):
+            return
+
+        if handle_rewrite_command(
             message,
             chat,
             bot_username
