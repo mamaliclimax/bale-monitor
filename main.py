@@ -66,6 +66,10 @@ BOT_INFO = None
 PENDING_ACTIONS = {}
 LAST_UPDATE_ID = None
 
+# وضعیت موقت برای جریان «گزارش مبدأ ↔ مقصد» (دو مرحله‌ای:
+# انتخاب مبدأ، سپس انتخاب مقصد از بین کانال‌های فعال).
+PAIR_REPORT_STATE = {}
+
 # آپدیت‌هایی که حتماً باید از سرور بله درخواست شوند.
 # نکته‌ی مهم: اگر این پارامتر در getUpdates ارسال نشود، برخی
 # سرورها (از جمله بله) آپدیت‌های my_chat_member / chat_member
@@ -1425,6 +1429,43 @@ def clear_reports_keyboard():
                 }
             ]
         ]
+    }
+
+
+def pair_destination_keyboard(candidates):
+
+    keyboard = []
+
+    for index, row in enumerate(candidates):
+
+        title = (
+            row.get("title")
+            or row.get("username")
+            or row.get("chat_id")
+            or "-"
+        )
+
+        title = str(title)
+
+        if len(title) > 40:
+            title = title[:40] + "…"
+
+        keyboard.append([
+            {
+                "text": f"🎯 {title}",
+                "callback_data": f"pairdst:{index}"
+            }
+        ])
+
+    keyboard.append([
+        {
+            "text": "❌ انصراف",
+            "callback_data": "cancel_pair_report"
+        }
+    ])
+
+    return {
+        "inline_keyboard": keyboard
     }
 
 
@@ -4349,6 +4390,262 @@ def get_reposts_for_selected_source(
 
 
 # =========================================================
+# PAIR REPORT (گزارش مبدأ ↔ مقصد)
+# =========================================================
+
+def resolve_pair_source_from_message(message):
+
+    forwarded = extract_forward(
+        message
+    )
+
+    if forwarded:
+
+        return {
+            "channel_id": str(
+                forwarded.get("channel_id")
+            ),
+            "username": forwarded.get(
+                "username"
+            ),
+            "title": forwarded.get(
+                "title"
+            )
+        }
+
+    text = (
+        message.get("text")
+        or ""
+    ).strip()
+
+    if not text:
+        return None
+
+    chat = get_chat(text)
+
+    if not chat:
+        return None
+
+    chat_type = chat.get("type")
+
+    if chat_type not in (
+        "group",
+        "supergroup",
+        "channel"
+    ):
+        return None
+
+    return {
+        "channel_id": str(
+            chat.get("id")
+        ),
+        "username": clean_username(
+            chat.get("username")
+        ),
+        "title": (
+            chat.get("title")
+            or chat.get("username")
+            or chat.get("id")
+        )
+    }
+
+
+def resolve_pair_destination_from_identifier(identifier):
+
+    if not identifier:
+        return None
+
+    identifier = str(identifier).strip()
+
+    if not identifier:
+        return None
+
+    row = None
+
+    if identifier.lstrip("-").isdigit():
+
+        row = get_channel_by_chat_id(
+            identifier
+        )
+
+    else:
+
+        row = get_channel_by_username(
+            identifier
+        )
+
+    return row
+
+
+def get_reposts_for_source_destination(
+    source_channel_id,
+    destination_channel_id
+):
+
+    try:
+
+        result = (
+            supabase
+            .table("reposts")
+            .select("*")
+            .eq(
+                "source_channel_id",
+                str(source_channel_id)
+            )
+            .eq(
+                "destination_channel_id",
+                str(destination_channel_id)
+            )
+            .order(
+                "created_at",
+                desc=True
+            )
+            .execute()
+        )
+
+        return result.data or []
+
+    except Exception as e:
+
+        print(
+            "GET PAIR REPOSTS ERROR:",
+            repr(e)
+        )
+
+        return []
+
+
+def generate_pair_report(
+    source,
+    destination_row
+):
+
+    destination_chat_id = destination_row.get(
+        "chat_id"
+    )
+
+    rows = get_reposts_for_source_destination(
+        source.get("channel_id"),
+        destination_chat_id
+    )
+
+    destination_title = (
+        destination_row.get("title")
+        or destination_row.get("username")
+        or destination_row.get("chat_id")
+        or "-"
+    )
+
+    members_count = get_chat_members_count(
+        destination_chat_id
+    )
+
+    text = (
+        "📍 <b>گزارش مبدأ ↔ مقصد</b>\n\n"
+        f"📡 <b>مبدأ:</b> "
+        f"{html_text(source.get('title') or '-')}\n"
+        f"🎯 <b>مقصد:</b> "
+        f"{html_text(destination_title)}\n"
+    )
+
+    if members_count is not None:
+
+        text += (
+            f"👥 <b>اعضای مقصد:</b> "
+            f"{to_persian_digits(members_count)}\n"
+        )
+
+    text += (
+        f"\n📈 <b>تعداد کل بازنشرها:</b> "
+        f"{to_persian_digits(len(rows))}\n"
+    )
+
+    if not rows:
+
+        text += (
+            "\n"
+            "ℹ️ هنوز هیچ بازنشری بین این مبدأ "
+            "و مقصد ثبت نشده است."
+        )
+
+        return text
+
+    total_views = sum(
+        int(row.get("views") or 0)
+        for row in rows
+        if str(row.get("views") or "").isdigit()
+    )
+
+    if total_views > 0:
+
+        text += (
+            f"👁 <b>مجموع ویوهای ثبت‌شده:</b> "
+            f"{to_persian_digits(total_views)}\n"
+        )
+
+    text += "\n"
+
+    for index, row in enumerate(
+        rows,
+        start=1
+    ):
+
+        message_title = (
+            row.get("message_title")
+            or "بدون عنوان"
+        )
+
+        created_at_raw = row.get(
+            "created_at"
+        )
+
+        created_at = format_iran_datetime(
+            created_at_raw
+        )
+
+        elapsed = humanize_elapsed_fa(
+            created_at_raw
+        )
+
+        destination_link = (
+            row.get(
+                "destination_message_link"
+            )
+            or ""
+        )
+
+        views_count = row.get(
+            "views"
+        )
+
+        text += (
+            f"<b>{to_persian_digits(index)}.</b> "
+            f"📝 {html_text(message_title)}\n"
+            f"   🕐 {html_text(created_at)} "
+            f"({html_text(elapsed)})\n"
+        )
+
+        if views_count is not None:
+
+            text += (
+                f"   👁 ویو: "
+                f"{to_persian_digits(views_count)}\n"
+            )
+
+        if destination_link:
+
+            text += (
+                f"   🟢 <code>"
+                f"{html_text(destination_link)}"
+                f"</code>\n"
+            )
+
+        text += "\n"
+
+    return text
+
+
+# =========================================================
 # REPORT MARKDOWN
 # =========================================================
 
@@ -4987,7 +5284,8 @@ def main_keyboard(user_id):
                 {"text": "📈 وضعیت ربات"}
             ],
             [
-                {"text": "📣 بازنشر گسترده"}
+                {"text": "📣 بازنشر گسترده"},
+                {"text": "📍 گزارش مبدأ و مقصد"}
             ],
             [
                 {"text": "🗑️ پاک کردن کلیه گزارش‌ها"}
@@ -5014,7 +5312,8 @@ def main_keyboard(user_id):
                 {"text": "📈 وضعیت ربات"}
             ],
             [
-                {"text": "📣 بازنشر گسترده"}
+                {"text": "📣 بازنشر گسترده"},
+                {"text": "📍 گزارش مبدأ و مقصد"}
             ],
             [
                 {"text": "❓ راهنما"}
@@ -5135,6 +5434,10 @@ def send_help(chat_id, user_id):
             "یک پست، همان پست به‌صورت خودکار به تمام "
             "مقصدهای فعال ارسال می‌شود (نیاز به ادمین "
             "بودن ربات در آن مقصد دارد).\n\n"
+            "🔹 <b>گزارش مبدأ و مقصد</b>\n"
+            "با «📍 گزارش مبدأ و مقصد»، یک کانال مبدأ و "
+            "یک مقصد مشخص انتخاب می‌کنید و تعداد کل "
+            "بازنشرهای انجام‌شده بین آن دو را می‌بینید.\n\n"
             "🔹 <b>شناسه من</b>\n"
             "<code>/myid</code>"
         )
@@ -5380,6 +5683,11 @@ def handle_command(
     if command.startswith("/cancel"):
 
         PENDING_ACTIONS.pop(
+            str(chat_id),
+            None
+        )
+
+        PAIR_REPORT_STATE.pop(
             str(chat_id),
             None
         )
@@ -5901,6 +6209,28 @@ def handle_button(
 
         return True
 
+    if text == "📍 گزارش مبدأ و مقصد":
+
+        key = str(chat_id)
+
+        PENDING_ACTIONS[key] = "pair_report_source"
+
+        PAIR_REPORT_STATE.pop(
+            key,
+            None
+        )
+
+        send_message(
+            chat_id,
+            "📍 <b>گزارش مبدأ و مقصد</b>\n\n"
+            "یک پست از کانال مبدأ مدنظر را برای من "
+            "Forward کنید؛ یا نام کاربری/شناسه‌ی آن "
+            "کانال را مستقیم بفرستید.\n\n"
+            "برای انصراف /cancel را بفرستید."
+        )
+
+        return True
+
     if text == "🔄 همگام‌سازی":
 
         send_message(
@@ -6214,6 +6544,133 @@ def process_callback_query(callback_query):
 
         return
 
+    # -----------------------------------------------------
+    # انتخاب مقصد در جریان «گزارش مبدأ و مقصد»
+    # -----------------------------------------------------
+
+    if data == "cancel_pair_report":
+
+        if not is_admin(user_id):
+
+            if callback_id:
+
+                answer_callback_query(
+                    callback_id,
+                    "⛔ شما دسترسی مدیریتی ندارید.",
+                    True
+                )
+
+            return
+
+        key = str(chat_id)
+
+        PENDING_ACTIONS.pop(
+            key,
+            None
+        )
+
+        PAIR_REPORT_STATE.pop(
+            key,
+            None
+        )
+
+        send_message(
+            chat_id,
+            "❌ گزارش مبدأ و مقصد لغو شد.",
+            main_keyboard(user_id)
+        )
+
+        return
+
+    if data.startswith("pairdst:"):
+
+        if not is_admin(user_id):
+
+            if callback_id:
+
+                answer_callback_query(
+                    callback_id,
+                    "⛔ شما دسترسی مدیریتی ندارید.",
+                    True
+                )
+
+            return
+
+        key = str(chat_id)
+
+        state = PAIR_REPORT_STATE.get(
+            key
+        )
+
+        if not state:
+
+            send_message(
+                chat_id,
+                "❌ این درخواست منقضی شده؛ "
+                "لطفاً دوباره از منو شروع کنید.",
+                main_keyboard(user_id)
+            )
+
+            return
+
+        try:
+
+            idx = int(
+                data.split(":", 1)[1]
+            )
+
+        except Exception:
+
+            idx = -1
+
+        candidates = state.get(
+            "candidates"
+        ) or []
+
+        if idx < 0 or idx >= len(candidates):
+
+            send_message(
+                chat_id,
+                "❌ گزینه‌ی نامعتبر."
+            )
+
+            return
+
+        destination_row = candidates[idx]
+
+        source = state.get("source")
+
+        PENDING_ACTIONS.pop(
+            key,
+            None
+        )
+
+        PAIR_REPORT_STATE.pop(
+            key,
+            None
+        )
+
+        if not source:
+
+            send_message(
+                chat_id,
+                "❌ مبدأ گم شده؛ لطفاً دوباره شروع کنید.",
+                main_keyboard(user_id)
+            )
+
+            return
+
+        send_message(
+            chat_id,
+            generate_pair_report(
+                source,
+                destination_row
+            ),
+            main_keyboard(user_id)
+        )
+
+        return
+
 
 # =========================================================
 # PENDING ACTION
@@ -6372,6 +6829,11 @@ def handle_pending_action(
             None
         )
 
+        PAIR_REPORT_STATE.pop(
+            key,
+            None
+        )
+
         send_message(
             chat_id,
             "❌ عملیات لغو شد.",
@@ -6394,6 +6856,147 @@ def handle_pending_action(
             chat_id,
             user_id
         )
+
+    # -----------------------------------------------------
+    # گزارش مبدأ و مقصد - مرحله‌ی اول: شناسایی مبدأ
+    #
+    # ممکن است با Forward یک پست (بدون متن) انجام شود، پس
+    # این هم نباید به وجود text وابسته باشد.
+    # -----------------------------------------------------
+
+    if action == "pair_report_source":
+
+        source = resolve_pair_source_from_message(
+            message
+        )
+
+        if not source or not source.get("channel_id"):
+
+            send_message(
+                chat_id,
+                "❌ کانال مبدأ شناسایی نشد.\n\n"
+                "یک پست از همان کانال را Forward کنید "
+                "یا نام کاربری/شناسه‌ی آن را بفرستید.\n\n"
+                "برای انصراف /cancel را بفرستید."
+            )
+
+            return True
+
+        active_channels = get_active_channels()
+
+        if not active_channels:
+
+            PENDING_ACTIONS.pop(
+                key,
+                None
+            )
+
+            send_message(
+                chat_id,
+                "⚠️ هیچ مقصد فعالی برای انتخاب وجود ندارد.",
+                main_keyboard(user_id)
+            )
+
+            return True
+
+        candidates = active_channels[:25]
+
+        PAIR_REPORT_STATE[key] = {
+            "source": source,
+            "candidates": candidates
+        }
+
+        PENDING_ACTIONS[key] = "pair_report_destination"
+
+        extra_note = ""
+
+        if len(active_channels) > len(candidates):
+
+            extra_note = (
+                "\n\nℹ️ چون تعداد مقصدها زیاد است، فقط "
+                f"{to_persian_digits(len(candidates))} "
+                "مورد اول نشان داده شده. برای مقصدهای "
+                "دیگر، نام کاربری یا شناسه‌شان را مستقیم "
+                "بفرستید."
+            )
+
+        send_message(
+            chat_id,
+            "✅ مبدأ شناسایی شد:\n"
+            f"📡 {html_text(source.get('title') or '-')}\n\n"
+            "حالا مقصد را از لیست زیر انتخاب کنید، یا "
+            "نام کاربری/شناسه‌ی آن را مستقیم بفرستید."
+            + extra_note,
+            pair_destination_keyboard(
+                candidates
+            )
+        )
+
+        return True
+
+    # -----------------------------------------------------
+    # گزارش مبدأ و مقصد - مرحله‌ی دوم: شناسایی مقصد
+    # (فقط ورودی متنی؛ انتخاب از کیبورد از طریق callback
+    # در process_callback_query انجام می‌شود)
+    # -----------------------------------------------------
+
+    if action == "pair_report_destination":
+
+        if not text:
+            return True
+
+        destination_row = resolve_pair_destination_from_identifier(
+            text
+        )
+
+        if not destination_row:
+
+            send_message(
+                chat_id,
+                "❌ این مقصد در لیست ربات پیدا نشد.\n\n"
+                "دوباره تلاش کنید یا از دکمه‌های بالا "
+                "استفاده کنید، یا /cancel را بفرستید."
+            )
+
+            return True
+
+        state = PAIR_REPORT_STATE.get(
+            key,
+            {}
+        )
+
+        source = state.get("source")
+
+        PENDING_ACTIONS.pop(
+            key,
+            None
+        )
+
+        PAIR_REPORT_STATE.pop(
+            key,
+            None
+        )
+
+        if not source:
+
+            send_message(
+                chat_id,
+                "❌ مبدأ گم شده؛ لطفاً دوباره شروع کنید.",
+                main_keyboard(user_id)
+            )
+
+            return True
+
+        send_message(
+            chat_id,
+            generate_pair_report(
+                source,
+                destination_row
+            ),
+            main_keyboard(user_id)
+        )
+
+        return True
 
     if not text:
         return False
