@@ -52,17 +52,17 @@ GEMINI_TTS_MAX_CHARS = int(
     os.environ.get("GEMINI_TTS_MAX_CHARS", "4000")
 )
 
-# مدل ساخت عکس با Gemini (Nano Banana / Flash Image)
-# گزینه‌های رایج: gemini-3.1-flash-image ، gemini-2.5-flash-image
-GEMINI_IMAGE_MODEL = os.environ.get(
-    "GEMINI_IMAGE_MODEL",
-    "gemini-3.1-flash-image"
+# Cloudflare Workers AI برای ساخت عکس (Flux)
+# رایگان روزانه محدود (حدود ۱۰۰–۲۳۰ عکس در روز بسته به تنظیمات)
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
+# مدل پیش‌فرض: سریع و مناسب سطح رایگان
+CLOUDFLARE_IMAGE_MODEL = os.environ.get(
+    "CLOUDFLARE_IMAGE_MODEL",
+    "@cf/black-forest-labs/flux-1-schnell"
 )
-# نسبت تصویر پیش‌فرض (1:1 ، 16:9 ، 9:16 و ...)
-GEMINI_IMAGE_ASPECT_RATIO = os.environ.get(
-    "GEMINI_IMAGE_ASPECT_RATIO",
-    "1:1"
-)
+# تعداد گام‌های دیفیوژن (۴ پیش‌فرض، حداکثر ۸ برای schnell)
+CLOUDFLARE_IMAGE_STEPS = int(os.environ.get("CLOUDFLARE_IMAGE_STEPS", "4"))
 
 if not BALE_TOKEN:
     raise Exception("BALE_TOKEN is missing")
@@ -76,7 +76,13 @@ if not SUPABASE_SECRET_KEY:
 if not GEMINI_API_KEY:
     print(
         "⚠️ WARNING: GEMINI_API_KEY is missing. "
-        "AI text replies and Gemini image generation are disabled "
+        "AI text replies are disabled."
+    )
+
+if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
+    print(
+        "⚠️ WARNING: CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN missing. "
+        "Cloudflare image generation disabled "
         "(Pollinations fallback still works for /image)."
     )
 
@@ -89,11 +95,6 @@ GEMINI_TTS_API_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_TTS_MODEL}:generateContent"
 )
-GEMINI_IMAGE_API_URL = (
-    f"https://generativelanguage.googleapis.com/v1beta/models/"
-    f"{GEMINI_IMAGE_MODEL}:generateContent"
-)
-
 supabase = create_client(
     SUPABASE_URL,
     SUPABASE_SECRET_KEY
@@ -1229,7 +1230,7 @@ def handle_voice_command(message, chat, bot_username):
 
 # =========================================================
 # IMAGE GENERATION
-# اولویت: Gemini (با کلید GEMINI_API_KEY) → در صورت خطا Pollinations
+# اولویت: Cloudflare Workers AI (Flux) → در صورت خطا Pollinations
 # =========================================================
 
 IMAGE_COMMANDS = ("/image", "/عکس")
@@ -1264,43 +1265,38 @@ def get_image_prompt_from_text(text, bot_username):
     return rest or None
 
 
-def generate_gemini_image(prompt):
+def generate_cloudflare_image(prompt):
     """
-    ساخت عکس با مدل Gemini Image (مثل gemini-3.1-flash-image).
-    خروجی مسیر فایل موقت (png یا jpg) یا None در صورت خطا.
+    ساخت عکس با Cloudflare Workers AI (مدل Flux-1-Schnell).
+    خروجی مسیر فایل موقت jpg یا None در صورت خطا.
     فایل موقت باید توسط فراخوان حذف شود.
     """
 
-    if not GEMINI_API_KEY:
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
         return None
 
     if not prompt or not prompt.strip():
         return None
 
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": prompt.strip()}]
-            }
-        ],
-        "generationConfig": {
-            "responseModalities": ["IMAGE"],
-            "imageConfig": {
-                "aspectRatio": GEMINI_IMAGE_ASPECT_RATIO
-            }
-        }
-    }
+    url = (
+        f"https://api.cloudflare.com/client/v4/accounts/"
+        f"{CLOUDFLARE_ACCOUNT_ID}/ai/run/{CLOUDFLARE_IMAGE_MODEL}"
+    )
 
     headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
         "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
+    }
+
+    payload = {
+        "prompt": prompt.strip(),
+        "steps": CLOUDFLARE_IMAGE_STEPS,
     }
 
     try:
 
         response = requests.post(
-            GEMINI_IMAGE_API_URL,
+            url,
             headers=headers,
             json=payload,
             timeout=90
@@ -1309,7 +1305,7 @@ def generate_gemini_image(prompt):
         if response.status_code != 200:
 
             print(
-                "GEMINI IMAGE ERROR:",
+                "CLOUDFLARE IMAGE ERROR:",
                 response.status_code,
                 response.text[:600]
             )
@@ -1318,57 +1314,44 @@ def generate_gemini_image(prompt):
 
         data = response.json()
 
-        candidates = data.get("candidates") or []
+        # ساختار پاسخ معمولاً:
+        # {"result": {"image": "<base64>"}}  یا  {"image": "<base64>"}
+        result = data.get("result") or data
+        image_b64 = None
 
-        if not candidates:
-            return None
-
-        parts = (
-            candidates[0]
-            .get("content", {})
-            .get("parts", [])
-        )
-
-        inline_data = None
-
-        for part in parts:
-
-            inline_data = (
-                part.get("inlineData")
-                or part.get("inline_data")
-            )
-
-            if inline_data:
-                break
-
-        if not inline_data:
-            return None
-
-        image_b64 = inline_data.get("data")
-        mime_type = (
-            inline_data.get("mimeType")
-            or inline_data.get("mime_type")
-            or "image/png"
-        )
+        if isinstance(result, dict):
+            image_b64 = result.get("image")
+        elif isinstance(result, str):
+            image_b64 = result
 
         if not image_b64:
+            # بعضی نسخه‌ها مستقیم binary برمی‌گردانند
+            content_type = response.headers.get("Content-Type", "")
+            if "image" in content_type:
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".jpg",
+                    delete=False
+                )
+                tmp.write(response.content)
+                tmp.close()
+                return tmp.name
+
+            print("CLOUDFLARE IMAGE: no image field in response")
+            print(str(data)[:400])
             return None
 
         import base64
 
+        # گاهی data URI کامل می‌آید
+        if "," in image_b64 and image_b64.startswith("data:"):
+            image_b64 = image_b64.split(",", 1)[1]
+
         image_bytes = base64.b64decode(image_b64)
 
-        suffix = ".png"
-        if "jpeg" in mime_type or "jpg" in mime_type:
-            suffix = ".jpg"
-        elif "webp" in mime_type:
-            suffix = ".webp"
-
         tmp = tempfile.NamedTemporaryFile(
-            suffix=suffix,
+            suffix=".jpg",
             delete=False
         )
-
         tmp.write(image_bytes)
         tmp.close()
 
@@ -1377,12 +1360,10 @@ def generate_gemini_image(prompt):
     except Exception as e:
 
         print(
-            "GEMINI IMAGE EXCEPTION:",
+            "CLOUDFLARE IMAGE EXCEPTION:",
             repr(e)
         )
-
         traceback.print_exc()
-
         return None
 
 
@@ -1441,14 +1422,14 @@ def generate_pollinations_image(prompt):
 
 def generate_image(prompt):
     """
-    اول Gemini را امتحان می‌کند؛ اگر کلید نبود یا خطا داد،
-    به Pollinations برمی‌گردد.
+    اول Cloudflare Workers AI (Flux) را امتحان می‌کند؛
+    اگر کلید نبود یا خطا داد، به Pollinations برمی‌گردد.
     """
 
-    image_path = generate_gemini_image(prompt)
+    image_path = generate_cloudflare_image(prompt)
 
     if image_path:
-        print("✅ IMAGE GENERATED WITH GEMINI")
+        print("✅ IMAGE GENERATED WITH CLOUDFLARE FLUX")
         return image_path
 
     print("↪️ FALLBACK TO POLLINATIONS")
@@ -1627,7 +1608,7 @@ def handle_image_command(message, chat, bot_username):
 
     try:
 
-        # اولویت با Gemini؛ در صورت خطا یا نبود کلید → Pollinations
+        # اولویت با Cloudflare Flux؛ در صورت خطا → Pollinations
         image_path = generate_image(prompt)
 
         if not image_path:
