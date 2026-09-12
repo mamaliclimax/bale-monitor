@@ -792,6 +792,19 @@ def handle_ai_question(
     chat_id = chat.get("id")
     message_id = message.get("message_id")
 
+    from_user = message.get("from") or {}
+    requester_id = from_user.get("id")
+
+    if not is_ai_allowed(requester_id):
+
+        send_message(
+            chat_id,
+            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
     prompt = build_ai_prompt(message, bot_username)
 
     if not prompt:
@@ -1042,6 +1055,19 @@ def handle_image_command(message, chat, bot_username):
 
     chat_id = chat.get("id")
     message_id = message.get("message_id")
+
+    from_user = message.get("from") or {}
+    requester_id = from_user.get("id")
+
+    if not is_ai_allowed(requester_id):
+
+        send_message(
+            chat_id,
+            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
+            reply_to_message_id=message_id
+        )
+
+        return True
 
     if not prompt:
 
@@ -1637,6 +1663,163 @@ def is_admin(user_id):
         )
 
         return False
+
+
+# =========================================================
+# AI ACCESS WHITELIST
+#
+# دسترسی به چت هوش مصنوعی (متن/عکس/صوت) پیش‌فرض فقط برای
+# مدیران است. مدیران می‌توانند کاربران خاصی را هم به این
+# لیست اضافه کنند تا فقط همان‌ها بتوانند از هوش مصنوعی
+# استفاده کنند، بدون این‌که دسترسی مدیریتی داشته باشند.
+# =========================================================
+
+def is_ai_allowed(user_id):
+
+    if not user_id:
+        return False
+
+    if is_admin(user_id):
+        return True
+
+    try:
+
+        result = (
+            supabase
+            .table("ai_allowed_users")
+            .select("id")
+            .eq("user_id", str(user_id))
+            .eq("active", True)
+            .limit(1)
+            .execute()
+        )
+
+        return bool(result.data)
+
+    except Exception as e:
+
+        print(
+            "IS AI ALLOWED ERROR:",
+            repr(e)
+        )
+
+        return False
+
+
+def add_ai_allowed_user(user_id):
+
+    user_id = str(user_id).strip()
+
+    if not user_id:
+        return False
+
+    try:
+
+        existing = (
+            supabase
+            .table("ai_allowed_users")
+            .select("id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+
+        if existing.data:
+
+            (
+                supabase
+                .table("ai_allowed_users")
+                .update({
+                    "active": True
+                })
+                .eq(
+                    "id",
+                    existing.data[0]["id"]
+                )
+                .execute()
+            )
+
+        else:
+
+            (
+                supabase
+                .table("ai_allowed_users")
+                .insert({
+                    "user_id": user_id,
+                    "active": True,
+                    "created_at": now_iso()
+                })
+                .execute()
+            )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "ADD AI ALLOWED USER ERROR:",
+            repr(e)
+        )
+
+        return False
+
+
+def remove_ai_allowed_user(user_id):
+
+    user_id = str(user_id).strip()
+
+    try:
+
+        (
+            supabase
+            .table("ai_allowed_users")
+            .update({
+                "active": False
+            })
+            .eq(
+                "user_id",
+                user_id
+            )
+            .execute()
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "REMOVE AI ALLOWED USER ERROR:",
+            repr(e)
+        )
+
+        return False
+
+
+def list_ai_allowed_users():
+
+    try:
+
+        result = (
+            supabase
+            .table("ai_allowed_users")
+            .select("user_id")
+            .eq("active", True)
+            .execute()
+        )
+
+        return [
+            row["user_id"]
+            for row in (result.data or [])
+        ]
+
+    except Exception as e:
+
+        print(
+            "LIST AI ALLOWED USERS ERROR:",
+            repr(e)
+        )
+
+        return []
 
 
 # =========================================================
@@ -5218,6 +5401,101 @@ def handle_command(
 
         return True
 
+    if command.startswith("/allow_ai"):
+
+        parts = text.split(" ", 1)
+
+        if len(parts) < 2 or not parts[1].strip():
+
+            send_message(
+                chat_id,
+                "❗ فرمت درست: /allow_ai USER_ID\n\n"
+                "برای پیدا کردن شناسه‌ی کاربر، از او بخواه در "
+                "خصوصی به ربات پیام بده و روی دکمه‌ی "
+                "«🆔 شناسه من» بزنه."
+            )
+
+            return True
+
+        target_id = parts[1].strip()
+
+        if add_ai_allowed_user(target_id):
+
+            send_message(
+                chat_id,
+                f"✅ دسترسی هوش مصنوعی برای کاربر "
+                f"<code>{html_text(target_id)}</code> فعال شد."
+            )
+
+        else:
+
+            send_message(
+                chat_id,
+                "❌ عملیات ناموفق بود."
+            )
+
+        return True
+
+    if command.startswith("/disallow_ai"):
+
+        parts = text.split(" ", 1)
+
+        if len(parts) < 2 or not parts[1].strip():
+
+            send_message(
+                chat_id,
+                "❗ فرمت درست: /disallow_ai USER_ID"
+            )
+
+            return True
+
+        target_id = parts[1].strip()
+
+        if remove_ai_allowed_user(target_id):
+
+            send_message(
+                chat_id,
+                f"✅ دسترسی هوش مصنوعی برای کاربر "
+                f"<code>{html_text(target_id)}</code> غیرفعال شد."
+            )
+
+        else:
+
+            send_message(
+                chat_id,
+                "❌ عملیات ناموفق بود."
+            )
+
+        return True
+
+    if command.startswith("/ai_users"):
+
+        allowed = list_ai_allowed_users()
+
+        if not allowed:
+
+            send_message(
+                chat_id,
+                "📋 در حال حاضر (به‌جز مدیران) هیچ کاربری به "
+                "هوش مصنوعی دسترسی ندارد.\n\n"
+                "برای افزودن: /allow_ai USER_ID"
+            )
+
+        else:
+
+            lines = "\n".join(
+                f"• <code>{html_text(uid)}</code>"
+                for uid in allowed
+            )
+
+            send_message(
+                chat_id,
+                "📋 <b>کاربران مجاز هوش مصنوعی:</b>\n\n"
+                f"{lines}"
+            )
+
+        return True
+
     if command.startswith("/report"):
 
         send_markdown_message(
@@ -5477,6 +5755,22 @@ def handle_command(
 # BUTTON HANDLER
 # =========================================================
 
+ADMIN_ONLY_BUTTON_TEXTS = {
+    "📊 گزارش بازنشر",
+    "📡 کانال‌ها و گروه‌ها",
+    "➕ افزودن مقصد",
+    "➖ حذف مقصد",
+    "📣 بازنشر گسترده",
+    "🔄 همگام‌سازی",
+    "📈 وضعیت ربات",
+    "🗑️ پاک کردن کلیه گزارش‌ها",
+    "⚙️ مدیریت مدیران",
+    "👥 مدیران ربات",
+    "➕ افزودن مدیر",
+    "➖ حذف مدیر",
+}
+
+
 def handle_button(
     message,
     chat_id,
@@ -5513,7 +5807,13 @@ def handle_button(
 
         return True
 
-    if not is_admin(user_id):
+    # ⚠️ این بررسی فقط برای دکمه‌های مخصوص مدیریت اعمال می‌شود؛
+    # پیام‌های آزاد کاربران عادی (که ممکن است سوال برای هوش
+    # مصنوعی باشند) نباید اینجا مسدود شوند.
+    if (
+        text in ADMIN_ONLY_BUTTON_TEXTS
+        and not is_admin(user_id)
+    ):
 
         send_message(
             chat_id,
