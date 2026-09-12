@@ -52,6 +52,18 @@ GEMINI_TTS_MAX_CHARS = int(
     os.environ.get("GEMINI_TTS_MAX_CHARS", "4000")
 )
 
+# مدل ساخت عکس با Gemini (Nano Banana / Flash Image)
+# گزینه‌های رایج: gemini-3.1-flash-image ، gemini-2.5-flash-image
+GEMINI_IMAGE_MODEL = os.environ.get(
+    "GEMINI_IMAGE_MODEL",
+    "gemini-3.1-flash-image"
+)
+# نسبت تصویر پیش‌فرض (1:1 ، 16:9 ، 9:16 و ...)
+GEMINI_IMAGE_ASPECT_RATIO = os.environ.get(
+    "GEMINI_IMAGE_ASPECT_RATIO",
+    "1:1"
+)
+
 if not BALE_TOKEN:
     raise Exception("BALE_TOKEN is missing")
 
@@ -62,7 +74,11 @@ if not SUPABASE_SECRET_KEY:
     raise Exception("SUPABASE_SECRET_KEY is missing")
 
 if not GEMINI_API_KEY:
-    print("⚠️ WARNING: GEMINI_API_KEY is missing. AI group replies are disabled.")
+    print(
+        "⚠️ WARNING: GEMINI_API_KEY is missing. "
+        "AI text replies and Gemini image generation are disabled "
+        "(Pollinations fallback still works for /image)."
+    )
 
 BALE_API = f"https://tapi.bale.ai/bot{BALE_TOKEN}"
 GEMINI_API_URL = (
@@ -72,6 +88,10 @@ GEMINI_API_URL = (
 GEMINI_TTS_API_URL = (
     f"https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_TTS_MODEL}:generateContent"
+)
+GEMINI_IMAGE_API_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_IMAGE_MODEL}:generateContent"
 )
 
 supabase = create_client(
@@ -1208,7 +1228,8 @@ def handle_voice_command(message, chat, bot_username):
 
 
 # =========================================================
-# IMAGE GENERATION (Pollinations.ai) - رایگان، بدون کلید
+# IMAGE GENERATION
+# اولویت: Gemini (با کلید GEMINI_API_KEY) → در صورت خطا Pollinations
 # =========================================================
 
 IMAGE_COMMANDS = ("/image", "/عکس")
@@ -1243,6 +1264,128 @@ def get_image_prompt_from_text(text, bot_username):
     return rest or None
 
 
+def generate_gemini_image(prompt):
+    """
+    ساخت عکس با مدل Gemini Image (مثل gemini-3.1-flash-image).
+    خروجی مسیر فایل موقت (png یا jpg) یا None در صورت خطا.
+    فایل موقت باید توسط فراخوان حذف شود.
+    """
+
+    if not GEMINI_API_KEY:
+        return None
+
+    if not prompt or not prompt.strip():
+        return None
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt.strip()}]
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["IMAGE"],
+            "imageConfig": {
+                "aspectRatio": GEMINI_IMAGE_ASPECT_RATIO
+            }
+        }
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+
+    try:
+
+        response = requests.post(
+            GEMINI_IMAGE_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=90
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "GEMINI IMAGE ERROR:",
+                response.status_code,
+                response.text[:600]
+            )
+
+            return None
+
+        data = response.json()
+
+        candidates = data.get("candidates") or []
+
+        if not candidates:
+            return None
+
+        parts = (
+            candidates[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+
+        inline_data = None
+
+        for part in parts:
+
+            inline_data = (
+                part.get("inlineData")
+                or part.get("inline_data")
+            )
+
+            if inline_data:
+                break
+
+        if not inline_data:
+            return None
+
+        image_b64 = inline_data.get("data")
+        mime_type = (
+            inline_data.get("mimeType")
+            or inline_data.get("mime_type")
+            or "image/png"
+        )
+
+        if not image_b64:
+            return None
+
+        import base64
+
+        image_bytes = base64.b64decode(image_b64)
+
+        suffix = ".png"
+        if "jpeg" in mime_type or "jpg" in mime_type:
+            suffix = ".jpg"
+        elif "webp" in mime_type:
+            suffix = ".webp"
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=suffix,
+            delete=False
+        )
+
+        tmp.write(image_bytes)
+        tmp.close()
+
+        return tmp.name
+
+    except Exception as e:
+
+        print(
+            "GEMINI IMAGE EXCEPTION:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+        return None
+
+
 def generate_pollinations_image(prompt):
     """
     ساخت عکس از روی متن با Pollinations.ai (رایگان، بدون نیاز
@@ -1255,7 +1398,6 @@ def generate_pollinations_image(prompt):
 
     try:
 
-        import tempfile
         from urllib.parse import quote
 
         encoded_prompt = quote(prompt.strip())
@@ -1295,6 +1437,23 @@ def generate_pollinations_image(prompt):
         )
 
         return None
+
+
+def generate_image(prompt):
+    """
+    اول Gemini را امتحان می‌کند؛ اگر کلید نبود یا خطا داد،
+    به Pollinations برمی‌گردد.
+    """
+
+    image_path = generate_gemini_image(prompt)
+
+    if image_path:
+        print("✅ IMAGE GENERATED WITH GEMINI")
+        return image_path
+
+    print("↪️ FALLBACK TO POLLINATIONS")
+    return generate_pollinations_image(prompt)
+
 
 
 def send_photo_file(
@@ -1468,7 +1627,8 @@ def handle_image_command(message, chat, bot_username):
 
     try:
 
-        image_path = generate_pollinations_image(prompt)
+        # اولویت با Gemini؛ در صورت خطا یا نبود کلید → Pollinations
+        image_path = generate_image(prompt)
 
         if not image_path:
 
