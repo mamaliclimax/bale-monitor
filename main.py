@@ -2,12 +2,15 @@ import os
 import time
 import traceback
 import requests
+import tempfile
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from html import escape
 
 from supabase import create_client
+import openpyxl
+from openpyxl.styles import Font, Alignment, PatternFill
 
 
 # =========================================================
@@ -1392,6 +1395,78 @@ def get_updates(offset=None):
         data,
         timeout=45
     )
+
+
+def bale_send_document(
+    chat_id,
+    file_path,
+    caption=None
+):
+
+    url = f"{BALE_API}/sendDocument"
+
+    try:
+
+        with open(file_path, "rb") as f:
+
+            files = {
+                "document": (
+                    os.path.basename(file_path),
+                    f
+                )
+            }
+
+            data = {
+                "chat_id": str(chat_id)
+            }
+
+            if caption:
+                data["caption"] = caption
+
+            response = requests.post(
+                url,
+                data=data,
+                files=files,
+                timeout=60
+            )
+
+        print(
+            "BALE sendDocument:",
+            response.status_code
+        )
+
+        try:
+
+            result = response.json()
+
+        except Exception:
+
+            print(
+                "BALE sendDocument RAW:",
+                response.text[:3000]
+            )
+
+            return None
+
+        if not result.get("ok"):
+
+            print(
+                "BALE sendDocument ERROR:",
+                result
+            )
+
+            return None
+
+        return result.get("result")
+
+    except Exception as e:
+
+        print(
+            "BALE sendDocument EXCEPTION:",
+            repr(e)
+        )
+
+        return None
 
 
 # =========================================================
@@ -4646,6 +4721,203 @@ def generate_pair_report(
 
 
 # =========================================================
+# EXCEL EXPORT
+# =========================================================
+
+def build_reposts_excel(
+    rows,
+    sheet_title="گزارش بازنشر"
+):
+
+    wb = openpyxl.Workbook()
+
+    ws = wb.active
+
+    ws.title = (
+        sheet_title[:31]
+        if sheet_title
+        else "گزارش"
+    )
+
+    ws.sheet_view.rightToLeft = True
+
+    headers = [
+        "ردیف",
+        "مبدأ",
+        "شناسه پست مبدأ",
+        "مقصد",
+        "نام‌کاربری مقصد",
+        "عنوان پست",
+        "تعداد ویو",
+        "تاریخ (شمسی)",
+        "چه مدت پیش",
+        "لینک مقصد"
+    ]
+
+    header_font = Font(
+        name="Arial",
+        bold=True,
+        color="FFFFFF"
+    )
+
+    header_fill = PatternFill(
+        start_color="2F5597",
+        end_color="2F5597",
+        fill_type="solid"
+    )
+
+    body_font = Font(
+        name="Arial"
+    )
+
+    center_align = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    for col_index, header in enumerate(
+        headers,
+        start=1
+    ):
+
+        cell = ws.cell(
+            row=1,
+            column=col_index,
+            value=header
+        )
+
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = center_align
+
+    for row_index, row in enumerate(
+        rows,
+        start=2
+    ):
+
+        created_at_raw = row.get(
+            "created_at"
+        )
+
+        views_value = row.get(
+            "views"
+        )
+
+        source_label = (
+            row.get("source_username")
+            or row.get("source_channel_id")
+            or "-"
+        )
+
+        destination_label = (
+            row.get("destination_title")
+            or row.get("destination_username")
+            or row.get("destination_channel_id")
+            or "-"
+        )
+
+        values = [
+            row_index - 1,
+            source_label,
+            row.get("source_message_id") or "-",
+            destination_label,
+            row.get("destination_username") or "-",
+            row.get("message_title") or "بدون عنوان",
+            (
+                views_value
+                if views_value is not None
+                else "-"
+            ),
+            format_iran_datetime(
+                created_at_raw
+            ),
+            humanize_elapsed_fa(
+                created_at_raw
+            ),
+            row.get(
+                "destination_message_link"
+            ) or "-"
+        ]
+
+        for col_index, value in enumerate(
+            values,
+            start=1
+        ):
+
+            cell = ws.cell(
+                row=row_index,
+                column=col_index,
+                value=value
+            )
+
+            cell.font = body_font
+            cell.alignment = center_align
+
+    column_widths = [
+        6, 22, 16, 24, 18, 32, 10, 18, 14, 42
+    ]
+
+    for col_index, width in enumerate(
+        column_widths,
+        start=1
+    ):
+
+        col_letter = ws.cell(
+            row=1,
+            column=col_index
+        ).column_letter
+
+        ws.column_dimensions[
+            col_letter
+        ].width = width
+
+    ws.freeze_panes = "A2"
+
+    tmp_dir = tempfile.gettempdir()
+
+    file_name = (
+        f"repost_report_{int(time.time())}.xlsx"
+    )
+
+    file_path = os.path.join(
+        tmp_dir,
+        file_name
+    )
+
+    wb.save(file_path)
+
+    return file_path
+
+
+def get_all_reposts():
+
+    try:
+
+        result = (
+            supabase
+            .table("reposts")
+            .select("*")
+            .order(
+                "created_at",
+                desc=True
+            )
+            .execute()
+        )
+
+        return result.data or []
+
+    except Exception as e:
+
+        print(
+            "GET ALL REPOSTS ERROR:",
+            repr(e)
+        )
+
+        return []
+
+
+# =========================================================
 # REPORT MARKDOWN
 # =========================================================
 
@@ -5288,6 +5560,10 @@ def main_keyboard(user_id):
                 {"text": "📍 گزارش مبدأ و مقصد"}
             ],
             [
+                {"text": "📥 خروجی اکسل"},
+                {"text": "📥 اکسل کل گزارش‌ها"}
+            ],
+            [
                 {"text": "🗑️ پاک کردن کلیه گزارش‌ها"}
             ],
             [
@@ -5314,6 +5590,9 @@ def main_keyboard(user_id):
             [
                 {"text": "📣 بازنشر گسترده"},
                 {"text": "📍 گزارش مبدأ و مقصد"}
+            ],
+            [
+                {"text": "📥 خروجی اکسل"}
             ],
             [
                 {"text": "❓ راهنما"}
@@ -5438,6 +5717,11 @@ def send_help(chat_id, user_id):
             "با «📍 گزارش مبدأ و مقصد»، یک کانال مبدأ و "
             "یک مقصد مشخص انتخاب می‌کنید و تعداد کل "
             "بازنشرهای انجام‌شده بین آن دو را می‌بینید.\n\n"
+            "🔹 <b>خروجی اکسل</b>\n"
+            "با «📥 خروجی اکسل»، گزارش مبدأ انتخابی‌تان "
+            "به‌صورت فایل Excel ارسال می‌شود. مالک ربات "
+            "با «📥 اکسل کل گزارش‌ها» می‌تواند خروجی کامل "
+            "تمام بازنشرهای ثبت‌شده را هم دریافت کند.\n\n"
             "🔹 <b>شناسه من</b>\n"
             "<code>/myid</code>"
         )
@@ -6228,6 +6512,155 @@ def handle_button(
             "کانال را مستقیم بفرستید.\n\n"
             "برای انصراف /cancel را بفرستید."
         )
+
+        return True
+
+    if text == "📥 خروجی اکسل":
+
+        source, rows = get_reposts_for_selected_source(
+            user_id
+        )
+
+        if not source.get("channel_id"):
+
+            send_message(
+                chat_id,
+                "⚠️ ابتدا باید یک پست مبدأ انتخاب کنید "
+                "(آن را برای من Forward کنید)، سپس دوباره "
+                "«📥 خروجی اکسل» را بزنید."
+            )
+
+            return True
+
+        if not rows:
+
+            send_message(
+                chat_id,
+                "ℹ️ هنوز هیچ بازنشری برای این مبدأ "
+                "ثبت نشده تا خروجی اکسل بگیریم."
+            )
+
+            return True
+
+        send_message(
+            chat_id,
+            "⏳ در حال ساخت فایل اکسل..."
+        )
+
+        file_path = None
+
+        try:
+
+            file_path = build_reposts_excel(
+                rows,
+                sheet_title=(
+                    source.get("title")
+                    or "گزارش بازنشر"
+                )
+            )
+
+            bale_send_document(
+                chat_id,
+                file_path,
+                caption=(
+                    "📊 گزارش بازنشر — "
+                    f"{source.get('title') or '-'}"
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                "EXCEL EXPORT ERROR:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "❌ ساخت فایل اکسل با خطا مواجه شد."
+            )
+
+        finally:
+
+            if file_path and os.path.exists(file_path):
+
+                try:
+
+                    os.remove(file_path)
+
+                except Exception:
+
+                    pass
+
+        return True
+
+    if text == "📥 اکسل کل گزارش‌ها":
+
+        if not is_owner(user_id):
+
+            send_message(
+                chat_id,
+                "⛔ فقط مالک ربات به این بخش دسترسی دارد."
+            )
+
+            return True
+
+        rows = get_all_reposts()
+
+        if not rows:
+
+            send_message(
+                chat_id,
+                "ℹ️ هنوز هیچ بازنشری در دیتابیس ثبت نشده است."
+            )
+
+            return True
+
+        send_message(
+            chat_id,
+            "⏳ در حال ساخت فایل اکسل کل گزارش‌ها..."
+        )
+
+        file_path = None
+
+        try:
+
+            file_path = build_reposts_excel(
+                rows,
+                sheet_title="کل گزارش‌ها"
+            )
+
+            bale_send_document(
+                chat_id,
+                file_path,
+                caption=(
+                    "📊 خروجی کامل تمام بازنشرهای ثبت‌شده"
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                "EXCEL EXPORT ALL ERROR:",
+                repr(e)
+            )
+
+            send_message(
+                chat_id,
+                "❌ ساخت فایل اکسل با خطا مواجه شد."
+            )
+
+        finally:
+
+            if file_path and os.path.exists(file_path):
+
+                try:
+
+                    os.remove(file_path)
+
+                except Exception:
+
+                    pass
 
         return True
 
