@@ -47,8 +47,30 @@ GEMINI_RETRY_DELAY_SECONDS = int(os.environ.get("GEMINI_RETRY_DELAY_SECONDS", "3
 # اختیاری است: اگر GROQ_API_KEY تنظیم نشود، فال‌بک غیرفعال می‌ماند
 # و رفتار قبلی (پیام خطا) ادامه پیدا می‌کند.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# اگر GROQ_MODEL تنظیم شود، همیشه اول همان امتحان می‌شود. Groq
+# مدل‌هایش را زیاد جابه‌جا/بازنشر می‌کند (چیزی که همین الان هم
+# باعث خطای 404 model_not_found شد)، پس یک لیست از مدل‌های
+# جایگزین هم داریم که به‌ترتیب امتحان می‌شوند تا یکی جواب بدهد؛
+# اولین موردی که کار کند برای دفعات بعد کش می‌شود.
+GROQ_MODEL = os.environ.get("GROQ_MODEL")
+GROQ_MODEL_CANDIDATES = [
+    m for m in [
+        GROQ_MODEL,
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3-32b",
+        "moonshotai/kimi-k2-instruct",
+        "llama-3.1-8b-instant",
+        "gemma2-9b-it",
+    ]
+    if m
+]
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# اولین مدل Groq که کار کرده (برای جلوگیری از تکرار تست مدل‌های
+# غیرفعال در هر درخواست).
+GROQ_WORKING_MODEL = {"id": None}
 
 # پاسخ صوتی: علاوه بر متن، یک پیام صوتی (Text-to-Speech) هم
 # برای پاسخ ساخته و ارسال می‌شود. با ست کردن AI_VOICE_ENABLED=0
@@ -634,17 +656,25 @@ def get_groq_system_prompt():
 
 def ask_groq(prompt, history=None):
     """
-    ارسال یک سوال متنی به Groq (مدل Llama از طریق API سازگار با
-    OpenAI) و دریافت پاسخ. این تابع به‌عنوان پشتیبان/Fallback وقتی
-    Gemini خطا بدهد (مثلاً سقف سهمیه) استفاده می‌شود. در صورت نبود
-    کلید یا بروز خطا، None برمی‌گرداند. Groq ابزار جست‌وجوی گوگل
-    ندارد، پس پاسخ‌هایش صرفاً از دانش خودِ مدل است.
+    ارسال یک سوال متنی به Groq (از طریق API سازگار با OpenAI) و
+    دریافت پاسخ. این تابع به‌عنوان پشتیبان/Fallback وقتی Gemini
+    خطا بدهد (مثلاً سقف سهمیه) استفاده می‌شود. در صورت نبود کلید
+    یا بروز خطا، None برمی‌گرداند. Groq ابزار جست‌وجوی گوگل ندارد،
+    پس پاسخ‌هایش صرفاً از دانش خودِ مدل است.
+
+    چون Groq مدل‌هایش را مرتب عوض/بازنشسته می‌کند، به‌جای تکیه به
+    یک نام مدل ثابت، از لیست GROQ_MODEL_CANDIDATES به‌ترتیب امتحان
+    می‌کند تا یکی جواب بدهد؛ اولین مدل موفق برای دفعات بعد کش
+    می‌شود تا هر بار همه را از اول تست نکنیم.
     """
 
     if not GROQ_API_KEY:
         return None
 
     if not prompt or not prompt.strip():
+        return None
+
+    if not GROQ_MODEL_CANDIDATES:
         return None
 
     messages = [
@@ -670,55 +700,93 @@ def ask_groq(prompt, history=None):
         "Authorization": f"Bearer {GROQ_API_KEY}"
     }
 
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": messages
-    }
+    # اول مدلی که قبلاً جواب داده امتحان می‌شود (اگر داریم)، بعد
+    # بقیه‌ی کاندیدها به همان ترتیب اولویت.
+    ordered_models = []
 
-    try:
+    if GROQ_WORKING_MODEL["id"]:
+        ordered_models.append(GROQ_WORKING_MODEL["id"])
 
-        response = requests.post(
-            GROQ_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=40
-        )
+    for model_id in GROQ_MODEL_CANDIDATES:
 
-        if response.status_code != 200:
+        if model_id not in ordered_models:
+            ordered_models.append(model_id)
+
+    for model_id in ordered_models:
+
+        payload = {
+            "model": model_id,
+            "messages": messages
+        }
+
+        try:
+
+            response = requests.post(
+                GROQ_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=40
+            )
+
+            if response.status_code == 200:
+
+                data = response.json()
+
+                choices = data.get("choices") or []
+
+                if not choices:
+                    return None
+
+                answer = (
+                    choices[0]
+                    .get("message", {})
+                    .get("content", "")
+                ).strip()
+
+                if answer:
+                    GROQ_WORKING_MODEL["id"] = model_id
+
+                return answer or None
 
             print(
                 "GROQ ERROR:",
+                model_id,
                 response.status_code,
                 response.text[:500]
             )
 
+            error_code = ""
+
+            try:
+                error_code = (
+                    response.json()
+                    .get("error", {})
+                    .get("code", "")
+                )
+            except Exception:
+                pass
+
+            if response.status_code == 404 or error_code == "model_not_found":
+                # این مدل دیگر وجود ندارد؛ کاندید بعدی را امتحان کن
+                continue
+
+            # خطای دیگری بود (rate limit خودِ Groq، کلید نامعتبر و...)
+            # - امتحان مدل‌های دیگر فایده‌ای ندارد.
             return None
 
-        data = response.json()
+        except Exception as e:
 
-        choices = data.get("choices") or []
+            print(
+                "GROQ EXCEPTION:",
+                model_id,
+                repr(e)
+            )
 
-        if not choices:
+            traceback.print_exc()
+
             return None
 
-        answer = (
-            choices[0]
-            .get("message", {})
-            .get("content", "")
-        ).strip()
-
-        return answer or None
-
-    except Exception as e:
-
-        print(
-            "GROQ EXCEPTION:",
-            repr(e)
-        )
-
-        traceback.print_exc()
-
-        return None
+    return None
 
 
 # -----------------------------------------------------------
