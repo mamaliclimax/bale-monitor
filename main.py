@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import traceback
 import requests
@@ -26,6 +27,19 @@ SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 # غیرفعال می‌ماند ولی بقیه‌ی ربات (بازنشر/گزارش) طبق معمول کار می‌کند.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+
+# حالت جست‌وجوی گوگل (google_search grounding) برای پاسخ‌های AI:
+#   auto   (پیش‌فرض) - فقط وقتی سوال شبیه نیاز به اطلاعات به‌روز
+#          باشد (خبر/امروز/قیمت/تاریخ/...) ابزار جست‌وجو فعال می‌شود
+#   always - همیشه فعال (دقیق‌تر ولی هزینه‌بر‌تر و زودتر به سقف
+#            سهمیه‌ی رایگان می‌خورد)
+#   off    - همیشه خاموش (ارزان‌ترین حالت، بدون اطلاعات به‌روز)
+GEMINI_SEARCH_MODE = os.environ.get("GEMINI_SEARCH_MODE", "auto").strip().lower()
+
+# تعداد تلاش مجدد وقتی Gemini خطای rate limit (429) بدهد، و چند
+# ثانیه بین هر تلاش صبر شود.
+GEMINI_RETRY_ON_429 = int(os.environ.get("GEMINI_RETRY_ON_429", "1"))
+GEMINI_RETRY_DELAY_SECONDS = int(os.environ.get("GEMINI_RETRY_DELAY_SECONDS", "3"))
 
 # پاسخ صوتی: علاوه بر متن، یک پیام صوتی (Text-to-Speech) هم
 # برای پاسخ ساخته و ارسال می‌شود. با ست کردن AI_VOICE_ENABLED=0
@@ -500,24 +514,167 @@ AI_MAX_HISTORY = 6
 # { chat_id: [ {"role":..,"text":..}, ... ] }
 AI_CHAT_HISTORY = {}
 
-AI_SYSTEM_PROMPT = (
-    "تو یک دستیار هوشمند فارسی‌زبان هستی که داخل پیام‌رسان بله "
-    "فعالیت می‌کنی. پاسخ‌هایت را کوتاه، مفید، محاوره‌ای و مودبانه بنویس. "
-    "اگر سوال نامفهوم بود، مؤدبانه بپرس منظور دقیق‌تر چیست."
+# -----------------------------------------------------------
+# 🩹 پاکسازی «ادعای قطع اطلاعات» از تاریخچه
+#
+# اگر مدل حتی یک‌بار (مثلاً قبل از فعال شدن google_search، یا
+# در یک پاسخ استثنایی) جمله‌ای شبیه «اطلاعات من تا فلان تاریخ
+# است» بگوید، همان جمله وارد AI_CHAT_HISTORY می‌شود. از آن به
+# بعد، در هر سوال جدید، این جمله‌ی خودِ مدل هم به‌عنوان بخشی از
+# context به خودش داده می‌شود و مدل تمایل پیدا می‌کند با پاسخ
+# قبلی‌اش هم‌راستا بماند و دوباره همان ادعا را تکرار کند (حتی
+# با وجود دستور صریح در system prompt). برای همین، پیش از
+# استفاده از تاریخچه، هر پاسخ قدیمی مدل که این الگو را دارد حذف
+# می‌شود تا این چرخه‌ی تکرار قطع شود.
+# -----------------------------------------------------------
+AI_CUTOFF_DISCLAIMER_RE = re.compile(
+    r"(اطلاعات(\s*و\s*دیتای)?\s*من\s*تا|"
+    r"داده(‌|\s)?های\s*من\s*تا|"
+    r"دیتای\s*من\s*تا|"
+    r"دانش\s*من\s*تا|"
+    r"تا\s*این\s*تاریخ\s*اطلاع|"
+    r"اطلاع\s*دقیقی\s*ندارم|"
+    r"به[‌\s]?روز\s*نیستم|"
+    r"training data|knowledge cutoff|"
+    r"قطع\s*(اطلاعات|آموزش))",
+    re.IGNORECASE
 )
 
 
-def ask_gemini(prompt, history=None):
+def sanitize_ai_history(history):
+    """
+    از تاریخچه‌ی گفت‌وگو، پاسخ‌های قبلی مدل که ادعای «اطلاعاتم
+    تا فلان تاریخه» یا مشابهش را دارند حذف می‌کند (همراه با
+    پیام کاربر متناظرش)، تا این جمله دوباره به مدل «یادآوری»
+    نشود. پیام‌های کاربر و سایر پاسخ‌های سالم دست‌نخورده باقی
+    می‌مانند.
+    """
+
+    if not history:
+        return history
+
+    cleaned = []
+
+    skip_next_user = False
+
+    for item in history:
+
+        role = item.get("role")
+        item_text = item.get("text", "")
+
+        if role == "model" and AI_CUTOFF_DISCLAIMER_RE.search(item_text):
+            # این پاسخ مدل را حذف کن؛ چون معمولاً بلافاصله بعد
+            # از یک سوال کاربر می‌آید که خودش هم دیگر لازم نیست
+            # نگه داشته شود (برای جلوگیری از پیام‌های یتیم).
+            continue
+
+        cleaned.append(item)
+
+    return cleaned
+
+
+AI_SYSTEM_PROMPT = (
+    "تو یک دستیار هوشمند فارسی‌زبان هستی که داخل پیام‌رسان بله "
+    "فعالیت می‌کنی. پاسخ‌هایت را کوتاه، مفید، محاوره‌ای و مودبانه بنویس. "
+    "اگر سوال نامفهوم بود، مؤدبانه بپرس منظور دقیق‌تر چیست.\n\n"
+    "به ابزار جست‌وجوی گوگل (google_search) دسترسی داری. برای هر سوالی "
+    "درباره‌ی اخبار، اتفاقات روز، قیمت‌ها، یا هر چیزی که ممکن است بعد از "
+    "زمان آموزشت تغییر کرده باشد، حتماً از این ابزار برای گرفتن اطلاعات "
+    "به‌روز استفاده کن. هرگز نگو «اطلاعات من تا فلان تاریخ است» یا از "
+    "پاسخ به سوالات مربوط به تاریخ امروز/اخبار جدید امتناع نکن؛ در عوض "
+    "جست‌وجو کن و بر اساس نتایج جست‌وجو جواب بده."
+)
+
+
+def get_ai_system_prompt():
+    """
+    system prompt را با تاریخ و ساعت امروز (به وقت ایران) همراه
+    می‌کند تا مدل بداند «امروز» دقیقاً چه تاریخی است و به‌جای
+    تکیه به تاریخ قطع آموزش خودش، از google_search برای اطلاعات
+    جدید استفاده کند.
+    """
+
+    now_ir = datetime.now(IRAN_TZ)
+
+    today_str = now_ir.strftime("%Y-%m-%d %H:%M")
+
+    return (
+        AI_SYSTEM_PROMPT +
+        f"\n\nتاریخ و ساعت فعلی (به وقت ایران): {today_str}"
+    )
+
+
+# -----------------------------------------------------------
+# 🔎 تشخیص خودکار نیاز به جست‌وجو (حالت GEMINI_SEARCH_MODE=auto)
+#
+# برای جلوگیری از فعال بودن همیشگی google_search (که هم هزینه
+# دارد و هم زودتر به سقف سهمیه‌ی رایگان می‌خورد)، فقط وقتی سوال
+# شامل کلمات نشان‌دهنده‌ی نیاز به اطلاعات به‌روز باشد، ابزار
+# جست‌وجو فعال می‌شود. برای سوالات عادی/عمومی (تعریف، محاسبه،
+# گفت‌وگوی معمولی) جست‌وجو انجام نمی‌شود.
+# -----------------------------------------------------------
+AI_SEARCH_TRIGGER_RE = re.compile(
+    r"("
+    r"خبر|اخبار|امروز|دیروز|فردا|الان|اکنون|همین\s*الان|"
+    r"جدید(ترین)?|تازه(ترین)?|به[‌\s]?روز|آخرین|"
+    r"قیمت|نرخ|دلار|یورو|طلا|سکه|بورس|سهام|بازار|تورم|"
+    r"هوا(ی)?\s|آب\s*و\s*هوا|پیش‌بینی\s*هوا|"
+    r"نتیجه|نتایج|امتحان|کنکور|انتخابات|رای‌گیری|"
+    r"رئیس[‌\s]?جمهور|نخست[‌\s]?وزیر|وزیر|رییس|مدیرعامل|"
+    r"رویداد|مسابقه|بازی|فوتبال|المپیک|جام\s*جهانی|"
+    r"جنگ|تحریم|درگیری|زلزله|بحران|"
+    r"چند\s*شنبه|امروز\s*چندمه|تاریخ\s*(امروز|دقیق)|"
+    r"سال\s*140\d|سال\s*20\d\d|202\d|203\d"
+    r")",
+    re.IGNORECASE
+)
+
+
+def prompt_needs_search(prompt):
+    """
+    تشخیص می‌دهد که آیا متن سوال کاربر به‌احتمال زیاد نیازمند
+    اطلاعات به‌روز (و در نتیجه جست‌وجوی گوگل) است یا نه.
+    """
+
+    if not prompt:
+        return False
+
+    return bool(AI_SEARCH_TRIGGER_RE.search(prompt))
+
+
+# آخرین خطای Gemini (برای تصمیم‌گیری پیام مناسب به کاربر):
+# None یا 429 (rate limit) یا کد دیگر/"exception"
+GEMINI_LAST_ERROR = {"status": None}
+
+
+def ask_gemini(prompt, history=None, use_search=None):
     """
     ارسال یک سوال متنی به Gemini و دریافت پاسخ.
-    در صورت نبود کلید یا بروز خطا، None برمی‌گرداند.
+    در صورت نبود کلید یا بروز خطا، None برمی‌گرداند (و
+    GEMINI_LAST_ERROR["status"] برای تشخیص نوع خطا ست می‌شود).
+
+    use_search:
+        None  -> طبق GEMINI_SEARCH_MODE تصمیم‌گیری خودکار می‌شود
+        True  -> جست‌وجوی گوگل حتماً فعال می‌شود
+        False -> جست‌وجوی گوگل حتماً غیرفعال می‌شود
     """
+
+    GEMINI_LAST_ERROR["status"] = None
 
     if not GEMINI_API_KEY:
         return None
 
     if not prompt or not prompt.strip():
         return None
+
+    if use_search is None:
+
+        if GEMINI_SEARCH_MODE == "always":
+            use_search = True
+        elif GEMINI_SEARCH_MODE == "off":
+            use_search = False
+        else:
+            use_search = prompt_needs_search(prompt)
 
     contents = []
 
@@ -537,26 +694,52 @@ def ask_gemini(prompt, history=None):
 
     payload = {
         "system_instruction": {
-            "parts": [{"text": AI_SYSTEM_PROMPT}]
+            "parts": [{"text": get_ai_system_prompt()}]
         },
         "contents": contents
     }
+
+    if use_search:
+        payload["tools"] = [{"google_search": {}}]
 
     headers = {
         "Content-Type": "application/json",
         "x-goog-api-key": GEMINI_API_KEY
     }
 
-    try:
+    max_attempts = 1 + max(0, GEMINI_RETRY_ON_429)
 
-        response = requests.post(
-            GEMINI_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=40
-        )
+    for attempt in range(max_attempts):
 
-        if response.status_code != 200:
+        try:
+
+            response = requests.post(
+                GEMINI_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=40
+            )
+
+            if response.status_code == 200:
+
+                data = response.json()
+
+                candidates = data.get("candidates") or []
+
+                if not candidates:
+                    return None
+
+                parts = (
+                    candidates[0]
+                    .get("content", {})
+                    .get("parts", [])
+                )
+
+                answer = "".join(
+                    part.get("text", "") for part in parts
+                ).strip()
+
+                return answer or None
 
             print(
                 "GEMINI ERROR:",
@@ -564,35 +747,27 @@ def ask_gemini(prompt, history=None):
                 response.text[:500]
             )
 
+            GEMINI_LAST_ERROR["status"] = response.status_code
+
+            if response.status_code == 429 and attempt < max_attempts - 1:
+
+                time.sleep(GEMINI_RETRY_DELAY_SECONDS)
+                continue
+
             return None
 
-        data = response.json()
+        except Exception as e:
 
-        candidates = data.get("candidates") or []
+            print(
+                "GEMINI EXCEPTION:",
+                repr(e)
+            )
 
-        if not candidates:
+            GEMINI_LAST_ERROR["status"] = "exception"
+
             return None
 
-        parts = (
-            candidates[0]
-            .get("content", {})
-            .get("parts", [])
-        )
-
-        answer = "".join(
-            part.get("text", "") for part in parts
-        ).strip()
-
-        return answer or None
-
-    except Exception as e:
-
-        print(
-            "GEMINI EXCEPTION:",
-            repr(e)
-        )
-
-        return None
+    return None
 
 
 def is_bot_mentioned(text, bot_username, message=None):
@@ -859,11 +1034,25 @@ def handle_ai_question(
     if not prompt:
         return False
 
-    history = AI_CHAT_HISTORY.get(chat_id, [])
+    history = sanitize_ai_history(
+        AI_CHAT_HISTORY.get(chat_id, [])
+    )
 
     answer = ask_gemini(prompt, history=history)
 
     if not answer:
+
+        if GEMINI_LAST_ERROR.get("status") == 429:
+
+            send_message(
+                chat_id,
+                "⏳ الان درخواست‌های هوش مصنوعی زیاد شده و به سقف "
+                "مجاز خورده. لطفاً چند لحظه صبر کن و دوباره بپرس.",
+                reply_to_message_id=message_id
+            )
+
+            return True
+
         return False
 
     history = history + [
@@ -871,7 +1060,9 @@ def handle_ai_question(
         {"role": "model", "text": answer}
     ]
 
-    AI_CHAT_HISTORY[chat_id] = history[-AI_MAX_HISTORY:]
+    AI_CHAT_HISTORY[chat_id] = sanitize_ai_history(
+        history[-AI_MAX_HISTORY:]
+    )
 
     send_message(
         chat_id,
@@ -6845,6 +7036,29 @@ def handle_command(
         send_message(
             chat_id,
             "❌ عملیات لغو شد.",
+            main_keyboard(user_id)
+        )
+
+        return True
+
+    if command.startswith("/reset_ai") or command.startswith("/پاک_حافظه"):
+
+        if not is_ai_allowed(user_id):
+
+            send_message(
+                chat_id,
+                "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید."
+            )
+
+            return True
+
+        AI_CHAT_HISTORY.pop(chat_id, None)
+
+        send_message(
+            chat_id,
+            "🧹 حافظه‌ی گفت‌وگوی هوش مصنوعی این چت پاک شد.\n\n"
+            "اگر ربات جمله‌ی «اطلاعاتم تا فلان تاریخه» را تکرار "
+            "می‌کرد، از این به بعد نباید دوباره تکرار شود.",
             main_keyboard(user_id)
         )
 
