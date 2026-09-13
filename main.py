@@ -2248,63 +2248,206 @@ def get_text_from_message_or_reply(message, command_rest):
     return None
 
 
-def ask_gemini_with_system(system_prompt, user_text):
+def ask_groq_with_system(system_prompt, user_text):
     """
-    یک بار Gemini را با system_instruction دلخواه صدا می‌زند
-    (بدون تاریخچه چت). برای خلاصه و بازنویسی مناسب است.
+    مثل ask_groq ولی با system prompt دلخواه (برای خلاصه/بازنویسی).
+    در صورت نبود کلید یا خطا، None برمی‌گرداند.
     """
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         return None
 
     if not user_text or not user_text.strip():
         return None
 
-    payload = {
-        "system_instruction": {
-            "parts": [{"text": system_prompt}]
-        },
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": user_text.strip()}]
-            }
-        ]
-    }
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text.strip()},
+    ]
 
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
+        "Authorization": f"Bearer {GROQ_API_KEY}",
     }
 
-    try:
-        response = requests.post(
-            GEMINI_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=50
-        )
+    available_ids = fetch_groq_available_models()
 
-        if response.status_code != 200:
-            print(
-                "GEMINI TEXT-TOOL ERROR:",
-                response.status_code,
-                response.text[:500]
-            )
-            return None
+    ordered_models = []
 
-        data = response.json()
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return None
+    if GROQ_WORKING_MODEL["id"]:
+        ordered_models.append(GROQ_WORKING_MODEL["id"])
 
-        parts = candidates[0].get("content", {}).get("parts", [])
-        answer = "".join(p.get("text", "") for p in parts).strip()
-        return answer or None
+    for model_id in GROQ_MODEL_CANDIDATES:
+        if model_id in ordered_models:
+            continue
+        if not available_ids or model_id in available_ids:
+            ordered_models.append(model_id)
 
-    except Exception as e:
-        print("GEMINI TEXT-TOOL EXCEPTION:", repr(e))
-        traceback.print_exc()
+    if available_ids:
+        for model_id in available_ids:
+            if model_id in ordered_models:
+                continue
+            lowered = model_id.lower()
+            if any(
+                skip in lowered
+                for skip in ("whisper", "tts", "guard", "embed")
+            ):
+                continue
+            ordered_models.append(model_id)
+
+    if not ordered_models:
         return None
+
+    for model_id in ordered_models:
+        payload = {
+            "model": model_id,
+            "messages": messages,
+        }
+
+        try:
+            response = requests.post(
+                GROQ_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=50,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                choices = data.get("choices") or []
+                if not choices:
+                    return None
+                answer = (
+                    choices[0]
+                    .get("message", {})
+                    .get("content", "")
+                ).strip()
+                if answer:
+                    GROQ_WORKING_MODEL["id"] = model_id
+                return answer or None
+
+            print(
+                "GROQ TEXT-TOOL ERROR:",
+                model_id,
+                response.status_code,
+                response.text[:500],
+            )
+
+            response_json = {}
+            try:
+                response_json = response.json()
+            except Exception:
+                pass
+
+            if _is_groq_model_level_error(
+                response.status_code, response_json
+            ):
+                continue
+
+            return None
+
+        except Exception as e:
+            print(
+                "GROQ TEXT-TOOL EXCEPTION:",
+                model_id,
+                repr(e),
+            )
+            traceback.print_exc()
+            return None
+
+    return None
+
+
+def ask_gemini_with_system(system_prompt, user_text):
+    """
+    یک بار Gemini را با system_instruction دلخواه صدا می‌زند
+    (بدون تاریخچه چت). برای خلاصه و بازنویسی مناسب است.
+    در صورت خطای Gemini (مثلاً سقف سهمیه)، به Groq فال‌بک می‌کند.
+    """
+    GEMINI_LAST_ERROR["status"] = None
+
+    if not user_text or not user_text.strip():
+        return None
+
+    answer = None
+
+    if GEMINI_API_KEY:
+        payload = {
+            "system_instruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": user_text.strip()}]
+                }
+            ]
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": GEMINI_API_KEY
+        }
+
+        max_attempts = 1 + max(0, GEMINI_RETRY_ON_429)
+
+        for attempt in range(max_attempts):
+            try:
+                response = requests.post(
+                    GEMINI_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=50
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    candidates = data.get("candidates") or []
+                    if not candidates:
+                        break
+
+                    parts = (
+                        candidates[0]
+                        .get("content", {})
+                        .get("parts", [])
+                    )
+                    answer = "".join(
+                        p.get("text", "") for p in parts
+                    ).strip()
+                    if answer:
+                        return answer
+                    break
+
+                print(
+                    "GEMINI TEXT-TOOL ERROR:",
+                    response.status_code,
+                    response.text[:500]
+                )
+                GEMINI_LAST_ERROR["status"] = response.status_code
+
+                if (
+                    response.status_code == 429
+                    and attempt < max_attempts - 1
+                ):
+                    time.sleep(GEMINI_RETRY_DELAY_SECONDS)
+                    continue
+
+                break
+
+            except Exception as e:
+                print("GEMINI TEXT-TOOL EXCEPTION:", repr(e))
+                traceback.print_exc()
+                GEMINI_LAST_ERROR["status"] = "exception"
+                break
+
+    # 🆘 فال‌بک به Groq وقتی Gemini جواب نداد
+    if not answer and GROQ_API_KEY:
+        print(
+            "GEMINI TEXT-TOOL FAILED, FALLING BACK TO GROQ. status:",
+            GEMINI_LAST_ERROR.get("status"),
+        )
+        answer = ask_groq_with_system(system_prompt, user_text)
+
+    return answer or None
 
 
 def handle_summary_command(message, chat, bot_username):
@@ -2378,9 +2521,18 @@ def handle_summary_command(message, chat, bot_username):
     summary = ask_gemini_with_system(system, source_text)
 
     if not summary:
+        if GEMINI_LAST_ERROR.get("status") == 429 and not GROQ_API_KEY:
+            err_msg = (
+                "⏳ الان درخواست‌های هوش مصنوعی زیاد شده و به سقف "
+                "مجاز خورده. لطفاً چند لحظه صبر کن و دوباره بپرس."
+            )
+        else:
+            err_msg = (
+                "متاسفانه در خلاصه‌سازی خطایی پیش آمد. دوباره امتحان کن."
+            )
         send_message(
             chat_id,
-            "متاسفانه در خلاصه‌سازی خطایی پیش آمد. دوباره امتحان کن.",
+            err_msg,
             reply_to_message_id=message_id
         )
         return True
@@ -2495,9 +2647,18 @@ def handle_rewrite_command(message, chat, bot_username):
     result = ask_gemini_with_system(style["system"], source_text)
 
     if not result:
+        if GEMINI_LAST_ERROR.get("status") == 429 and not GROQ_API_KEY:
+            err_msg = (
+                "⏳ الان درخواست‌های هوش مصنوعی زیاد شده و به سقف "
+                "مجاز خورده. لطفاً چند لحظه صبر کن و دوباره بپرس."
+            )
+        else:
+            err_msg = (
+                "متاسفانه در بازنویسی خطایی پیش آمد. دوباره امتحان کن."
+            )
         send_message(
             chat_id,
-            "متاسفانه در بازنویسی خطایی پیش آمد. دوباره امتحان کن.",
+            err_msg,
             reply_to_message_id=message_id
         )
         return True
