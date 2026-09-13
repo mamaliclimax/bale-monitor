@@ -654,6 +654,104 @@ def get_groq_system_prompt():
     )
 
 
+# لیست مدل‌های واقعاً فعال Groq (از خودِ API گرفته می‌شود، چون
+# لیست ثابت بالا ممکن است منسوخ شود - همان‌طور که همین الان هم
+# چند مدلش decommissioned از آب درآمدند).
+GROQ_MODELS_CACHE = {"ids": None}
+
+
+def fetch_groq_available_models():
+    """
+    لیست id مدل‌های واقعاً در دسترس حساب Groq را از
+    GET /openai/v1/models می‌گیرد و کش می‌کند (در طول عمر پردازش،
+    یک‌بار). در صورت خطا، لیست خالی برمی‌گرداند (نه None) تا
+    دوباره امتحان نکنیم.
+    """
+
+    if GROQ_MODELS_CACHE["ids"] is not None:
+        return GROQ_MODELS_CACHE["ids"]
+
+    ids = []
+
+    if GROQ_API_KEY:
+
+        try:
+
+            response = requests.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                timeout=15
+            )
+
+            if response.status_code == 200:
+
+                data = response.json()
+
+                ids = [
+                    m.get("id")
+                    for m in (data.get("data") or [])
+                    if m.get("id")
+                ]
+
+            else:
+
+                print(
+                    "GROQ MODELS LIST ERROR:",
+                    response.status_code,
+                    response.text[:300]
+                )
+
+        except Exception as e:
+
+            print(
+                "GROQ MODELS LIST EXCEPTION:",
+                repr(e)
+            )
+
+    GROQ_MODELS_CACHE["ids"] = ids
+
+    return ids
+
+
+def _is_groq_model_level_error(status_code, response_json):
+    """
+    تشخیص می‌دهد که آیا خطای Groq مربوط به «خودِ این مدل» است
+    (پس باید کاندید بعدی را امتحان کرد) یا یک خطای عمومی‌تر است
+    (کلید نامعتبر، rate limit خودِ Groq و...) که امتحان مدل‌های
+    دیگر هم فایده‌ای ندارد.
+    """
+
+    if status_code == 404:
+        return True
+
+    error = (response_json or {}).get("error", {})
+
+    error_code = str(error.get("code") or "").lower()
+    error_message = str(error.get("message") or "").lower()
+
+    model_error_codes = (
+        "model_not_found",
+        "model_decommissioned",
+        "model_terminated",
+        "invalid_model",
+    )
+
+    if error_code in model_error_codes:
+        return True
+
+    if "model" in error_code and (
+        "not found" in error_message or
+        "decommission" in error_message or
+        "no longer" in error_message
+    ):
+        return True
+
+    if "decommission" in error_message or "no longer supported" in error_message:
+        return True
+
+    return False
+
+
 def ask_groq(prompt, history=None):
     """
     ارسال یک سوال متنی به Groq (از طریق API سازگار با OpenAI) و
@@ -663,18 +761,16 @@ def ask_groq(prompt, history=None):
     پس پاسخ‌هایش صرفاً از دانش خودِ مدل است.
 
     چون Groq مدل‌هایش را مرتب عوض/بازنشسته می‌کند، به‌جای تکیه به
-    یک نام مدل ثابت، از لیست GROQ_MODEL_CANDIDATES به‌ترتیب امتحان
-    می‌کند تا یکی جواب بدهد؛ اولین مدل موفق برای دفعات بعد کش
-    می‌شود تا هر بار همه را از اول تست نکنیم.
+    یک نام مدل ثابت، اول لیست واقعی مدل‌های در دسترس حساب را از
+    API می‌گیرد و از بین کاندیدهای شناخته‌شده هر کدام که واقعاً
+    موجود باشد را امتحان می‌کند تا یکی جواب بدهد؛ اولین مدل موفق
+    برای دفعات بعد کش می‌شود تا هر بار همه را از اول تست نکنیم.
     """
 
     if not GROQ_API_KEY:
         return None
 
     if not prompt or not prompt.strip():
-        return None
-
-    if not GROQ_MODEL_CANDIDATES:
         return None
 
     messages = [
@@ -700,8 +796,15 @@ def ask_groq(prompt, history=None):
         "Authorization": f"Bearer {GROQ_API_KEY}"
     }
 
-    # اول مدلی که قبلاً جواب داده امتحان می‌شود (اگر داریم)، بعد
-    # بقیه‌ی کاندیدها به همان ترتیب اولویت.
+    available_ids = fetch_groq_available_models()
+
+    # ترتیب اولویت:
+    # ۱. مدلی که قبلاً جواب داده (اگر داریم)
+    # ۲. کاندیدهای شناخته‌شده‌ای که واقعاً در لیست حساب موجودند
+    # ۳. اگر لیست حساب گرفته شد ولی هیچ‌کدام از کاندیدها توش
+    #    نبود، بقیه‌ی مدل‌های متنی آن لیست (به‌جز whisper/tts/guard)
+    # ۴. اگر گرفتن لیست حساب هم شکست خورد (خالی بود)، همان
+    #    کاندیدهای ثابت را کورکورانه امتحان کن (بهتر از هیچی)
     ordered_models = []
 
     if GROQ_WORKING_MODEL["id"]:
@@ -709,8 +812,31 @@ def ask_groq(prompt, history=None):
 
     for model_id in GROQ_MODEL_CANDIDATES:
 
-        if model_id not in ordered_models:
+        if model_id in ordered_models:
+            continue
+
+        if not available_ids or model_id in available_ids:
             ordered_models.append(model_id)
+
+    if available_ids:
+
+        for model_id in available_ids:
+
+            if model_id in ordered_models:
+                continue
+
+            lowered = model_id.lower()
+
+            if any(
+                skip in lowered
+                for skip in ("whisper", "tts", "guard", "embed")
+            ):
+                continue
+
+            ordered_models.append(model_id)
+
+    if not ordered_models:
+        return None
 
     for model_id in ordered_models:
 
@@ -755,19 +881,16 @@ def ask_groq(prompt, history=None):
                 response.text[:500]
             )
 
-            error_code = ""
+            response_json = {}
 
             try:
-                error_code = (
-                    response.json()
-                    .get("error", {})
-                    .get("code", "")
-                )
+                response_json = response.json()
             except Exception:
                 pass
 
-            if response.status_code == 404 or error_code == "model_not_found":
-                # این مدل دیگر وجود ندارد؛ کاندید بعدی را امتحان کن
+            if _is_groq_model_level_error(response.status_code, response_json):
+                # این مدل دیگر وجود ندارد/منسوخ شده؛ کاندید بعدی
+                # را امتحان کن.
                 continue
 
             # خطای دیگری بود (rate limit خودِ Groq، کلید نامعتبر و...)
