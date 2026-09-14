@@ -103,57 +103,112 @@ AI_SETTINGS_FILE = os.path.join(
     "ai_settings.json"
 )
 _AI_SETTINGS_CACHE = None
+AI_SETTING_KEYS = {
+    "primary_ai_provider",
+    "orcarouter_model",
+    "pollinations_text_model",
+}
+
+
+def _load_local_ai_settings():
+    """فقط به‌عنوان پشتیبان موقت؛ منبع اصلی تنظیمات Supabase است."""
+    try:
+        with open(AI_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def load_ai_settings():
-
+    """خواندن تنظیمات مدل‌ها از Supabase؛ در صورت خطا، فایل محلی."""
     global _AI_SETTINGS_CACHE
 
     if _AI_SETTINGS_CACHE is not None:
         return _AI_SETTINGS_CACHE
 
+    settings = {}
+
     try:
+        result = (
+            supabase
+            .table("bot_settings")
+            .select("key, value")
+            .in_("key", list(AI_SETTING_KEYS))
+            .execute()
+        )
 
-        with open(AI_SETTINGS_FILE, "r", encoding="utf-8") as f:
-            _AI_SETTINGS_CACHE = json.load(f)
+        for row in (result.data or []):
+            key = row.get("key")
+            value = row.get("value")
+            if key in AI_SETTING_KEYS and value is not None:
+                settings[key] = value
 
-    except Exception:
+        # مهاجرت یک‌باره تنظیمات قدیمی فایل، اگر در Supabase نبودند.
+        if not settings:
+            settings = _load_local_ai_settings()
 
-        _AI_SETTINGS_CACHE = {}
+        print("✅ AI SETTINGS LOADED:", settings)
 
+    except Exception as e:
+        print("⚠️ AI SETTINGS SUPABASE LOAD ERROR:", repr(e))
+        settings = _load_local_ai_settings()
+
+    _AI_SETTINGS_CACHE = settings
     return _AI_SETTINGS_CACHE
 
 
 def save_ai_settings():
+    """ذخیره تنظیمات مدل‌ها در Supabase و هم‌زمان فایل پشتیبان."""
+    global _AI_SETTINGS_CACHE
+
+    settings = _AI_SETTINGS_CACHE or {}
+    rows = [
+        {"key": key, "value": str(value)}
+        for key, value in settings.items()
+        if key in AI_SETTING_KEYS and value is not None
+    ]
+
+    success = False
 
     try:
-
-        with open(AI_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                _AI_SETTINGS_CACHE or {},
-                f,
-                ensure_ascii=False,
-                indent=2
+        if rows:
+            (
+                supabase
+                .table("bot_settings")
+                .upsert(rows, on_conflict="key")
+                .execute()
             )
-
+            success = True
+            print("✅ AI SETTINGS SAVED TO SUPABASE:", settings)
     except Exception as e:
+        print("⚠️ AI SETTINGS SUPABASE SAVE ERROR:", repr(e))
 
-        print(
-            "AI SETTINGS SAVE ERROR:",
-            repr(e)
-        )
+    # فایل پشتیبان محلی؛ نبودن آن مانع اجرای ربات نمی‌شود.
+    try:
+        with open(AI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print("AI SETTINGS LOCAL BACKUP ERROR:", repr(e))
+
+    return success
 
 
 def get_ai_setting(key, default=None):
-
     return load_ai_settings().get(key, default)
 
 
 def set_ai_setting(key, value):
+    global _AI_SETTINGS_CACHE
+
+    if key not in AI_SETTING_KEYS:
+        print("⚠️ UNKNOWN AI SETTING:", key)
+        return False
 
     settings = load_ai_settings()
-    settings[key] = value
-    save_ai_settings()
+    settings[key] = str(value)
+    _AI_SETTINGS_CACHE = settings
+    return save_ai_settings()
 
 
 # مدل/ارائه‌دهنده اصلی پاسخ‌گویی متنی که مالک می‌تواند از داخل ربات تغییر دهد.
@@ -201,7 +256,7 @@ def get_selected_orcarouter_model():
 # grok و...) پشتیبانی می‌کند؛ مدل پیش‌فرض با دستور /text_model
 # توسط مالک ربات قابل‌تغییر است (بدون نیاز به ری‌دیپلوی).
 POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/openai"
-POLLINATIONS_MODELS_URL = "https://text.pollinations.ai/models"
+POLLINATIONS_MODELS_URL = "https://gen.pollinations.ai/v1/models"
 # کلید sk_ اختیاری (از enter.pollinations.ai) - فقط برای نرخ
 # بالاتر/مدل‌های ویژه لازم است، بدونش هم کار می‌کند.
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
@@ -1149,45 +1204,76 @@ def ask_pollinations_text(prompt, history=None, system_prompt=None, model=None):
 
 def fetch_pollinations_text_models():
     """
-    لیست زنده‌ی مدل‌های متنی Pollinations را برمی‌گرداند (برای
-    دستور /text_models). خروجی لیست رشته یا [] در صورت خطا.
+    فهرست زنده مدل‌های متنی Pollinations را از API رسمی می‌گیرد.
+    API فعلی /v1/models را به‌صورت OpenAI-compatible برمی‌گرداند.
+    برای سازگاری با پاسخ‌های قدیمی‌تر، فرمت list/dict نیز پشتیبانی می‌شود.
     """
-
     try:
-
-        response = requests.get(
-            POLLINATIONS_MODELS_URL,
-            timeout=15
-        )
-
+        response = requests.get(POLLINATIONS_MODELS_URL, timeout=15)
         if response.status_code != 200:
+            print("POLLINATIONS MODELS ERROR:", response.status_code, response.text[:300])
             return []
 
         data = response.json()
-
-        if isinstance(data, list):
-
-            names = []
-
-            for item in data:
-
-                if isinstance(item, str):
-                    names.append(item)
-                elif isinstance(item, dict):
-                    names.append(item.get("name") or item.get("id") or "")
-
-            return [n for n in names if n]
-
-        return []
-
+        items = data.get("data", []) if isinstance(data, dict) else data
+        names = []
+        for item in items or []:
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(item.get("id") or item.get("name") or "").strip()
+            else:
+                name = ""
+            if name and name not in names:
+                names.append(name)
+        return names
     except Exception as e:
-
-        print(
-            "POLLINATIONS MODELS LIST EXCEPTION:",
-            repr(e)
-        )
-
+        print("POLLINATIONS MODELS LIST EXCEPTION:", repr(e))
+        traceback.print_exc()
         return []
+
+
+def pollinations_model_keyboard(models=None):
+    """ساخت کیبورد انتخاب مدل Pollinations؛ مدل‌ها زنده از API دریافت می‌شوند."""
+    models = models if models is not None else fetch_pollinations_text_models()
+    current = str(get_pollinations_text_model() or "openai").strip()
+
+    # مدل‌های خیلی طولانی را حذف نکن؛ callback فقط شناسه مدل را نگه می‌دارد.
+    # برای جلوگیری از شلوغی پنل، حداکثر 30 مدل اول نمایش داده می‌شوند.
+    visible = models[:30]
+    keyboard = []
+    for i in range(0, len(visible), 2):
+        row = []
+        for model_id in visible[i:i+2]:
+            label = ("✅ " if model_id == current else "") + model_id
+            if len(label) > 30:
+                label = label[:29] + "…"
+            keyboard.append([]) if False else None
+            row.append({
+                "text": label,
+                "callback_data": "pollmodel:" + model_id
+            })
+        keyboard.append(row)
+
+    keyboard.append([
+        {"text": "🔄 دریافت دوباره فهرست مدل‌ها", "callback_data": "pollmodel:__refresh__"}
+    ])
+    keyboard.append([
+        {"text": "⬅️ بازگشت به پنل مدل‌ها", "callback_data": "pollmodel:__back__"}
+    ])
+    return {"inline_keyboard": keyboard}
+
+
+def pollinations_model_panel_text(models=None):
+    current = str(get_pollinations_text_model() or "openai").strip()
+    count = len(models or [])
+    return (
+        "🌸 <b>مدل‌های Pollinations</b>\n\n"
+        "مدل موردنظر را انتخاب کنید. فهرست از API به‌صورت زنده دریافت می‌شود.\n\n"
+        f"🎯 <b>مدل فعلی:</b> <code>{html_text(current)}</code>\n"
+        f"📚 <b>تعداد مدل‌های شناسایی‌شده:</b> {count}\n\n"
+        "⚠️ دسترسی و هزینه/سهمیه بعضی مدل‌ها ممکن است متفاوت باشد."
+    )
 
 
 
@@ -3854,6 +3940,9 @@ def model_management_keyboard():
                 {"text": "🌸 Pollinations", "callback_data": "modelprov:pollinations"}
             ],
             [
+                {"text": "🌸 انتخاب مدل Pollinations", "callback_data": "modelpoll:list"}
+            ],
+            [
                 {"text": "🐋 Hy3 رایگان", "callback_data": "modelorca:tencent/hy3-free"},
                 {"text": "🔀 روتر رایگان", "callback_data": "modelorca:orcarouter/free"}
             ],
@@ -3870,6 +3959,7 @@ def model_management_keyboard():
 def model_management_text():
     provider = get_primary_ai_provider()
     orca_model = get_selected_orcarouter_model()
+    poll_model = get_pollinations_text_model()
 
     availability = [
         f"Gemini: {'✅ فعال' if GEMINI_API_KEY else '⚪ کلید ندارد'}",
@@ -3883,7 +3973,8 @@ def model_management_text():
         "از دکمه‌های زیر مدل یا سرویس اصلی پاسخ‌گویی را انتخاب کنید.\n"
         "در صورت خطای مدل اصلی، ربات از مسیرهای پشتیبان استفاده می‌کند.\n\n"
         f"🎯 <b>انتخاب فعلی:</b> {html_text(primary_ai_label(provider))}\n"
-        f"🐋 <b>مدل OrcaRouter:</b> <code>{html_text(orca_model)}</code>\n\n"
+        f"🐋 <b>مدل OrcaRouter:</b> <code>{html_text(orca_model)}</code>\n"
+        f"🌸 <b>مدل Pollinations:</b> <code>{html_text(poll_model)}</code>\n\n"
         "📡 <b>وضعیت کلیدها:</b>\n"
         + "\n".join(f"• {x}" for x in availability)
         + "\n\n⚠️ مدل‌های رایگان ممکن است محدودیت نرخ درخواست داشته باشند."
@@ -9598,7 +9689,7 @@ def process_callback_query(callback_query):
     # 🤖 پنل مدیریت مدل‌ها - فقط مالک
     # -----------------------------------------------------
 
-    if data.startswith("modelpanel:") or data.startswith("modelprov:") or data.startswith("modelorca:"):
+    if data.startswith("modelpanel:") or data.startswith("modelprov:") or data.startswith("modelorca:") or data.startswith("modelpoll:") or data.startswith("pollmodel:"):
 
         if not is_owner(user_id):
             if callback_id:
@@ -9611,6 +9702,54 @@ def process_callback_query(callback_query):
 
         if data == "modelpanel:refresh":
             send_model_management_panel(chat_id)
+            return
+
+        if data == "modelpoll:list":
+            models = fetch_pollinations_text_models()
+            if not models:
+                send_message(
+                    chat_id,
+                    "❌ فهرست مدل‌های Pollinations دریافت نشد.\n\n"
+                    "ممکن است API موقتاً در دسترس نباشد؛ دوباره روی تازه‌سازی بزنید.",
+                    model_management_keyboard()
+                )
+                return
+            send_message(
+                chat_id,
+                pollinations_model_panel_text(models),
+                pollinations_model_keyboard(models)
+            )
+            return
+
+        if data.startswith("pollmodel:"):
+            action = data.split(":", 1)[1].strip()
+            if action == "__back__":
+                send_model_management_panel(chat_id)
+                return
+            if action == "__refresh__":
+                models = fetch_pollinations_text_models()
+                if not models:
+                    send_message(chat_id, "❌ دریافت فهرست مدل‌های Pollinations ناموفق بود.", pollinations_model_keyboard([]))
+                    return
+                send_message(chat_id, pollinations_model_panel_text(models), pollinations_model_keyboard(models))
+                return
+            models = fetch_pollinations_text_models()
+            if action not in models:
+                if callback_id:
+                    answer_callback_query(callback_id, "❌ این مدل دیگر در فهرست Pollinations نیست.", True)
+                return
+            if set_ai_setting("pollinations_text_model", action):
+                set_primary_ai_provider("pollinations")
+                send_message(
+                    chat_id,
+                    "✅ <b>مدل Pollinations انتخاب شد.</b>\n\n"
+                    f"🌸 مدل: <code>{html_text(action)}</code>\n"
+                    "🎯 سرویس اصلی: <b>Pollinations</b>\n\n"
+                    "آماده‌ی تست است.",
+                    pollinations_model_keyboard(models)
+                )
+            else:
+                send_message(chat_id, "❌ ذخیره مدل Pollinations ناموفق بود.", pollinations_model_keyboard(models))
             return
 
         if data.startswith("modelprov:"):
