@@ -29,6 +29,24 @@ SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 
+# =========================================================
+# 🐋 OrcaRouter - API سازگار با OpenAI
+# برای استفاده از مدل‌های رایگان OrcaRouter، کلید را در متغیر
+# ORCAROUTER_API_KEY قرار بده. مدل انتخابی پیش‌فرض، مدل رایگان
+# Tencent Hy3 است. این بخش مستقل از Gemini و Groq کار می‌کند.
+# =========================================================
+ORCAROUTER_API_KEY = os.environ.get("ORCAROUTER_API_KEY")
+ORCAROUTER_BASE_URL = os.environ.get(
+    "ORCAROUTER_BASE_URL",
+    "https://api.orcarouter.ai/v1"
+).rstrip("/")
+ORCAROUTER_MODEL = os.environ.get(
+    "ORCAROUTER_MODEL",
+    "tencent/hy3-free"
+)
+ORCAROUTER_TIMEOUT = int(os.environ.get("ORCAROUTER_TIMEOUT", "60"))
+ORCAROUTER_LAST_ERROR = {"status": None}
+
 # حالت جست‌وجوی گوگل (google_search grounding) برای پاسخ‌های AI:
 #   auto   (پیش‌فرض) - فقط وقتی سوال شبیه نیاز به اطلاعات به‌روز
 #          باشد (خبر/امروز/قیمت/تاریخ/...) ابزار جست‌وجو فعال می‌شود
@@ -138,6 +156,45 @@ def set_ai_setting(key, value):
     save_ai_settings()
 
 
+# مدل/ارائه‌دهنده اصلی پاسخ‌گویی متنی که مالک می‌تواند از داخل ربات تغییر دهد.
+# مقدار default یعنی ترتیب پیش‌فرض فعلی: Gemini -> OrcaRouter -> Groq -> Pollinations
+PRIMARY_AI_DEFAULT = "default"
+PRIMARY_AI_ALLOWED = {
+    "default",
+    "gemini",
+    "orcarouter",
+    "groq",
+    "pollinations"
+}
+
+def get_primary_ai_provider():
+    value = str(get_ai_setting("primary_ai_provider", PRIMARY_AI_DEFAULT) or PRIMARY_AI_DEFAULT).strip().lower()
+    return value if value in PRIMARY_AI_ALLOWED else PRIMARY_AI_DEFAULT
+
+def set_primary_ai_provider(value):
+    value = str(value or "").strip().lower()
+    if value not in PRIMARY_AI_ALLOWED:
+        return False
+    set_ai_setting("primary_ai_provider", value)
+    return True
+
+def primary_ai_label(provider):
+    return {
+        "default": "حالت پیش‌فرض فعلی (Gemini ← OrcaRouter ← Groq ← Pollinations)",
+        "gemini": "Gemini",
+        "orcarouter": "OrcaRouter",
+        "groq": "Groq",
+        "pollinations": "Pollinations"
+    }.get(provider, provider)
+
+def get_selected_orcarouter_model():
+    # مالک می‌تواند مدل OrcaRouter را از داخل ربات تغییر دهد؛
+    # اگر تنظیمی ثبت نشده باشد، مقدار Environment استفاده می‌شود.
+    return str(
+        get_ai_setting("orcarouter_model", ORCAROUTER_MODEL) or ORCAROUTER_MODEL
+    ).strip()
+
+
 # 🌸 Pollinations.ai (متن) - رایگان، بدون نیاز به کلید، به‌عنوان
 # آخرین لایه‌ی پشتیبان بعد از Gemini و Groq استفاده می‌شود. از
 # مدل‌های مختلف (openai، mistral، claude، gemini، deepseek،
@@ -203,10 +260,14 @@ if not SUPABASE_URL:
 if not SUPABASE_SECRET_KEY:
     raise Exception("SUPABASE_SECRET_KEY is missing")
 
-if not GEMINI_API_KEY:
+if not GEMINI_API_KEY and not ORCAROUTER_API_KEY and not GROQ_API_KEY:
     print(
-        "⚠️ WARNING: GEMINI_API_KEY is missing. "
-        "AI text replies are disabled."
+        "⚠️ WARNING: No AI text API key is configured. "
+        "AI text replies will use Pollinations fallback only."
+    )
+elif ORCAROUTER_API_KEY:
+    print(
+        f"✅ OrcaRouter enabled: {ORCAROUTER_MODEL}"
     )
 
 if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
@@ -1294,6 +1355,88 @@ def ask_gemini(prompt, history=None, use_search=None):
     return None
 
 
+def ask_orcarouter(prompt, history=None, system_prompt=None):
+    """
+    ارسال سوال متنی به OrcaRouter از طریق API سازگار با OpenAI.
+    مدل پیش‌فرض tencent/hy3-free است و می‌توان با ORCAROUTER_MODEL
+    آن را تغییر داد. در صورت خطا، None برمی‌گرداند تا لایه بعدی
+    (Groq یا Pollinations) بتواند پاسخ دهد.
+    """
+
+    ORCAROUTER_LAST_ERROR["status"] = None
+
+    if not ORCAROUTER_API_KEY:
+        return None
+
+    if not prompt or not prompt.strip():
+        return None
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt or get_groq_system_prompt()
+        }
+    ]
+
+    for item in (history or []):
+        role = "assistant" if item.get("role") == "model" else "user"
+        text = item.get("text", "")
+        if text:
+            messages.append({"role": role, "content": text})
+
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": get_selected_orcarouter_model(),
+        "messages": messages,
+        "temperature": 0.7
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {ORCAROUTER_API_KEY}"
+    }
+
+    try:
+        response = requests.post(
+            f"{ORCAROUTER_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=ORCAROUTER_TIMEOUT
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                return None
+
+            answer = (
+                choices[0]
+                .get("message", {})
+                .get("content", "")
+            )
+
+            # بعض مدل‌های استدلالی ممکن است content را خالی بدهند؛
+            # در این حالت پاسخ خالی محسوب می‌شود تا fallback فعال شود.
+            answer = (answer or "").strip()
+            return answer or None
+
+        ORCAROUTER_LAST_ERROR["status"] = response.status_code
+        print(
+            "ORCAROUTER ERROR:",
+            response.status_code,
+            response.text[:800]
+        )
+        return None
+
+    except Exception as e:
+        ORCAROUTER_LAST_ERROR["status"] = "exception"
+        print("ORCAROUTER EXCEPTION:", repr(e))
+        traceback.print_exc()
+        return None
+
+
 def is_bot_mentioned(text, bot_username, message=None):
     """
     تشخیص منشن ربات در متن پیام. هم حالت @username را بررسی
@@ -1359,7 +1502,7 @@ def is_ai_question_message(
     خصوصی همیشه (مگر دستور یا پیام خالی باشد).
     """
 
-    if not GEMINI_API_KEY:
+    if not (GEMINI_API_KEY or ORCAROUTER_API_KEY or GROQ_API_KEY):
         return False
 
     from_user = message.get("from") or {}
@@ -1562,29 +1705,45 @@ def handle_ai_question(
         AI_CHAT_HISTORY.get(chat_id, [])
     )
 
-    answer = ask_gemini(prompt, history=history)
+    # مالک می‌تواند ارائه‌دهنده اصلی را از داخل ربات انتخاب کند.
+    # default همان ترتیب پیش‌فرض قبلی را حفظ می‌کند.
+    primary_provider = get_primary_ai_provider()
 
-    if not answer and GROQ_API_KEY:
-
-        # 🆘 Gemini جواب نداد (مثلاً سقف سهمیه) - با Groq تلاش کن
-        # تا ربات به‌جای سکوت/پیام خطا، همچنان جواب بدهد.
-
-        print(
-            "GEMINI FAILED, FALLING BACK TO GROQ. status:",
-            GEMINI_LAST_ERROR.get("status")
-        )
-
+    if primary_provider == "gemini":
+        answer = ask_gemini(prompt, history=history)
+    elif primary_provider == "orcarouter":
+        answer = ask_orcarouter(prompt, history=history)
+    elif primary_provider == "groq":
         answer = ask_groq(prompt, history=history)
+    elif primary_provider == "pollinations":
+        answer = ask_pollinations_text(prompt, history=history)
+    else:
+        answer = ask_gemini(prompt, history=history)
 
-    if not answer:
+        if not answer and ORCAROUTER_API_KEY:
+            print(
+                "GEMINI FAILED, FALLING BACK TO ORCAROUTER. status:",
+                GEMINI_LAST_ERROR.get("status")
+            )
+            answer = ask_orcarouter(prompt, history=history)
 
-        # 🌸 آخرین لایه‌ی پشتیبان: Pollinations.ai (رایگان، بدون
-        # نیاز به کلید) - اگر Gemini و Groq هم جواب ندادند.
+        if not answer and GROQ_API_KEY:
+            print("GEMINI/ORCAROUTER FAILED, FALLING BACK TO GROQ.")
+            answer = ask_groq(prompt, history=history)
 
-        print(
-            "GEMINI+GROQ FAILED, FALLING BACK TO POLLINATIONS TEXT."
-        )
+        if not answer:
+            print("AI PROVIDERS FAILED, FALLING BACK TO POLLINATIONS TEXT.")
+            answer = ask_pollinations_text(prompt, history=history)
 
+    # اگر مدل انتخابی اصلی پاسخ نداد، برای جلوگیری از قطع کامل ربات
+    # از مسیرهای دیگر به‌عنوان پشتیبان استفاده می‌کنیم.
+    if not answer and primary_provider != "gemini" and GEMINI_API_KEY:
+        answer = ask_gemini(prompt, history=history)
+    if not answer and primary_provider != "orcarouter" and ORCAROUTER_API_KEY:
+        answer = ask_orcarouter(prompt, history=history)
+    if not answer and primary_provider != "groq" and GROQ_API_KEY:
+        answer = ask_groq(prompt, history=history)
+    if not answer and primary_provider != "pollinations":
         answer = ask_pollinations_text(prompt, history=history)
 
     if not answer:
@@ -2040,6 +2199,9 @@ def translate_prompt_to_english(prompt):
     )
 
     translated = ask_gemini(instruction, use_search=False)
+
+    if not translated and ORCAROUTER_API_KEY:
+        translated = ask_orcarouter(instruction)
 
     if not translated and GROQ_API_KEY:
         translated = ask_groq(instruction)
@@ -3033,7 +3195,18 @@ def ask_gemini_with_system(system_prompt, user_text):
                 GEMINI_LAST_ERROR["status"] = "exception"
                 break
 
-    # 🆘 فال‌بک به Groq وقتی Gemini جواب نداد
+    # 🐋 فال‌بک به OrcaRouter وقتی Gemini جواب نداد
+    if not answer and ORCAROUTER_API_KEY:
+        print(
+            "GEMINI TEXT-TOOL FAILED, FALLING BACK TO ORCAROUTER. status:",
+            GEMINI_LAST_ERROR.get("status"),
+        )
+        answer = ask_orcarouter(
+            user_text,
+            system_prompt=system_prompt
+        )
+
+    # 🆘 فال‌بک به Groq وقتی Gemini و OrcaRouter جواب ندادند
     if not answer and GROQ_API_KEY:
         print(
             "GEMINI TEXT-TOOL FAILED, FALLING BACK TO GROQ. status:",
@@ -3043,7 +3216,7 @@ def ask_gemini_with_system(system_prompt, user_text):
 
     # 🌸 آخرین لایه‌ی پشتیبان: Pollinations.ai (رایگان)
     if not answer:
-        print("GEMINI+GROQ TEXT-TOOL FAILED, FALLING BACK TO POLLINATIONS.")
+        print("GEMINI+ORCAROUTER+GROQ TEXT-TOOL FAILED, FALLING BACK TO POLLINATIONS.")
         answer = ask_pollinations_text(
             user_text,
             system_prompt=system_prompt
@@ -3659,6 +3832,70 @@ def pair_destination_keyboard(candidates):
         "inline_keyboard": keyboard
     }
 
+
+
+# =========================================================
+# 🤖 پنل مدیریت مدل‌ها (Inline / Glass Buttons)
+# =========================================================
+
+def model_management_keyboard():
+    """کیبورد شیشه‌ای پنل انتخاب مدل اصلی؛ فقط برای مالک نمایش داده می‌شود."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🟢 حالت پیش‌فرض فعلی", "callback_data": "modelprov:default"}
+            ],
+            [
+                {"text": "✨ Gemini", "callback_data": "modelprov:gemini"},
+                {"text": "🐋 OrcaRouter", "callback_data": "modelprov:orcarouter"}
+            ],
+            [
+                {"text": "⚡ Groq", "callback_data": "modelprov:groq"},
+                {"text": "🌸 Pollinations", "callback_data": "modelprov:pollinations"}
+            ],
+            [
+                {"text": "🐋 Hy3 رایگان", "callback_data": "modelorca:tencent/hy3-free"},
+                {"text": "🔀 روتر رایگان", "callback_data": "modelorca:orcarouter/free"}
+            ],
+            [
+                {"text": "🔄 تازه‌سازی وضعیت", "callback_data": "modelpanel:refresh"}
+            ],
+            [
+                {"text": "❌ بستن پنل", "callback_data": "modelpanel:close"}
+            ]
+        ]
+    }
+
+
+def model_management_text():
+    provider = get_primary_ai_provider()
+    orca_model = get_selected_orcarouter_model()
+
+    availability = [
+        f"Gemini: {'✅ فعال' if GEMINI_API_KEY else '⚪ کلید ندارد'}",
+        f"OrcaRouter: {'✅ فعال' if ORCAROUTER_API_KEY else '⚪ کلید ندارد'}",
+        f"Groq: {'✅ فعال' if GROQ_API_KEY else '⚪ کلید ندارد'}",
+        "Pollinations: ✅ بدون کلید"
+    ]
+
+    return (
+        "🤖 <b>پنل مدیریت مدل‌ها</b>\n\n"
+        "از دکمه‌های زیر مدل یا سرویس اصلی پاسخ‌گویی را انتخاب کنید.\n"
+        "در صورت خطای مدل اصلی، ربات از مسیرهای پشتیبان استفاده می‌کند.\n\n"
+        f"🎯 <b>انتخاب فعلی:</b> {html_text(primary_ai_label(provider))}\n"
+        f"🐋 <b>مدل OrcaRouter:</b> <code>{html_text(orca_model)}</code>\n\n"
+        "📡 <b>وضعیت کلیدها:</b>\n"
+        + "\n".join(f"• {x}" for x in availability)
+        + "\n\n⚠️ مدل‌های رایگان ممکن است محدودیت نرخ درخواست داشته باشند."
+    )
+
+
+def send_model_management_panel(chat_id):
+    send_message(
+        chat_id,
+        model_management_text(),
+        model_management_keyboard()
+    )
 
 # =========================================================
 # MESSAGE LINK
@@ -7723,6 +7960,9 @@ def main_keyboard(user_id):
                 {"text": "🗑️ پاک کردن کلیه گزارش‌ها"}
             ],
             [
+                {"text": "🤖 مدیریت مدل‌ها"}
+            ],
+            [
                 {"text": "⚙️ مدیریت مدیران"},
                 {"text": "❓ راهنما"}
             ]
@@ -8285,6 +8525,95 @@ def handle_command(
 
         return True
 
+    # -----------------------------------------------------
+    # انتخاب مدل/ارائه‌دهنده اصلی توسط مالک
+    # /مدل_اصلی یا /ai_primary
+    # -----------------------------------------------------
+    if command in ("/مدل_اصلی", "/مدلاصلی", "/ai_primary", "/primary_ai", "/مدیریت_مدل", "/مدیریت_مدل‌ها", "/model_panel"):
+
+        if command in ("/مدیریت_مدل", "/مدیریت_مدل‌ها", "/model_panel") and len(parts) == 1:
+            if not is_owner(user_id):
+                send_message(chat_id, "⛔ این پنل فقط برای مالک ربات است.")
+                return True
+            send_model_management_panel(chat_id)
+            return True
+
+        if not is_owner(user_id):
+            send_message(chat_id, "⛔ این دستور فقط برای مالک ربات است.")
+            return True
+
+        requested_raw = text.strip().split(" ", 1)[1].strip() if len(parts) > 1 else ""
+        requested = requested_raw.lower()
+
+        aliases = {
+            "پیشفرض": "default",
+            "پیش‌فرض": "default",
+            "default": "default",
+            "gemini": "gemini",
+            "جمنای": "gemini",
+            "orca": "orcarouter",
+            "orcarouter": "orcarouter",
+            "اورکا": "orcarouter",
+            "groq": "groq",
+            "گروک": "groq",
+            "pollinations": "pollinations",
+            "پالینیشن": "pollinations"
+        }
+
+        if not requested:
+            current = get_primary_ai_provider()
+            send_message(
+                chat_id,
+                "🤖 <b>تنظیم مدل اصلی پاسخ‌گویی</b>\n\n"
+                f"مدل اصلی فعلی: <b>{html_text(primary_ai_label(current))}</b>\n"
+                + (f"مدل OrcaRouter: <code>{html_text(get_selected_orcarouter_model())}</code>\n" if current == "orcarouter" else "")
+                + "\n"
+                "برای انتخاب، یکی از دستورهای زیر را بفرست:\n"
+                "<code>/مدل_اصلی default</code> — حالت پیش‌فرض فعلی\n"
+                "<code>/مدل_اصلی gemini</code> — فقط Gemini در اولویت\n"
+                "<code>/مدل_اصلی orcarouter</code> — OrcaRouter در اولویت\n"
+                "<code>/مدل_اصلی groq</code> — Groq در اولویت\n"
+                "<code>/مدل_اصلی pollinations</code> — Pollinations در اولویت\n\n"
+                "در صورت خطای مدل اصلی، مسیرهای دیگر به‌عنوان پشتیبان امتحان می‌شوند."
+            )
+            return True
+
+        # امکان انتخاب مدل مشخص OrcaRouter هم وجود دارد:
+        # /مدل_اصلی orcarouter:tencent/hy3-free
+        if ":" in requested_raw and requested_raw.split(":", 1)[0].lower() in ("orca", "orcarouter"):
+            model_id = requested_raw.split(":", 1)[1].strip()
+            if not model_id or len(model_id) > 200:
+                send_message(chat_id, "❗ شناسه مدل OrcaRouter معتبر نیست.")
+                return True
+            set_ai_setting("orcarouter_model", model_id)
+            set_primary_ai_provider("orcarouter")
+            send_message(
+                chat_id,
+                f"✅ مدل اصلی روی OrcaRouter تنظیم شد.\n\n"
+                f"مدل انتخاب‌شده: <code>{html_text(model_id)}</code>\n\n"
+                "در صورت خطا، مدل‌های پشتیبان امتحان می‌شوند."
+            )
+            return True
+
+        selected = aliases.get(requested)
+        if not selected or not set_primary_ai_provider(selected):
+            send_message(
+                chat_id,
+                "❗ گزینه نامعتبر است.\n\n"
+                "گزینه‌های مجاز: <code>default</code>، <code>gemini</code>، "
+                "<code>orcarouter</code>، <code>groq</code>، <code>pollinations</code>\n\n"
+                "برای انتخاب مدل مشخص OrcaRouter: \n"
+                "<code>/مدل_اصلی orcarouter:tencent/hy3-free</code>"
+            )
+            return True
+
+        send_message(
+            chat_id,
+            f"✅ مدل اصلی به <b>{html_text(primary_ai_label(selected))}</b> تغییر کرد.\n\n"
+            "این تنظیم ذخیره می‌شود و پس از ری‌استارت نیز باقی می‌ماند."
+        )
+        return True
+
     if command.startswith("/text_models"):
 
         if not is_owner(user_id):
@@ -8793,6 +9122,15 @@ def handle_button(
 
         return True
 
+    if text == "🤖 مدیریت مدل‌ها":
+
+        if not is_owner(user_id):
+            send_message(chat_id, "⛔ این پنل فقط برای مالک ربات است.")
+            return True
+
+        send_model_management_panel(chat_id)
+        return True
+
     if text == "📊 گزارش بازنشر":
 
         send_markdown_message(
@@ -9255,6 +9593,66 @@ def process_callback_query(callback_query):
                 "CALLBACK ANSWER ERROR:",
                 repr(e)
             )
+
+    # -----------------------------------------------------
+    # 🤖 پنل مدیریت مدل‌ها - فقط مالک
+    # -----------------------------------------------------
+
+    if data.startswith("modelpanel:") or data.startswith("modelprov:") or data.startswith("modelorca:"):
+
+        if not is_owner(user_id):
+            if callback_id:
+                answer_callback_query(callback_id, "⛔ این پنل فقط برای مالک ربات است.", True)
+            return
+
+        if data == "modelpanel:close":
+            send_message(chat_id, "✅ پنل مدیریت مدل‌ها بسته شد.", main_keyboard(user_id))
+            return
+
+        if data == "modelpanel:refresh":
+            send_model_management_panel(chat_id)
+            return
+
+        if data.startswith("modelprov:"):
+            provider = data.split(":", 1)[1].strip().lower()
+            if not set_primary_ai_provider(provider):
+                if callback_id:
+                    answer_callback_query(callback_id, "❌ گزینه نامعتبر است.", True)
+                return
+
+            warning = ""
+            if provider == "gemini" and not GEMINI_API_KEY:
+                warning = "\n\n⚠️ کلید Gemini در محیط ربات تنظیم نشده است."
+            elif provider == "orcarouter" and not ORCAROUTER_API_KEY:
+                warning = "\n\n⚠️ کلید OrcaRouter در محیط ربات تنظیم نشده است."
+            elif provider == "groq" and not GROQ_API_KEY:
+                warning = "\n\n⚠️ کلید Groq در محیط ربات تنظیم نشده است."
+
+            send_message(
+                chat_id,
+                f"✅ <b>مدل اصلی تغییر کرد.</b>\n\n"
+                f"🎯 انتخاب فعلی: <b>{html_text(primary_ai_label(provider))}</b>"
+                f"{warning}\n\n"
+                "برای تغییر دوباره، پنل مدیریت مدل‌ها را باز کنید.",
+                model_management_keyboard()
+            )
+            return
+
+        if data.startswith("modelorca:"):
+            model_id = data.split(":", 1)[1].strip()
+            if not model_id:
+                return
+            set_ai_setting("orcarouter_model", model_id)
+            set_primary_ai_provider("orcarouter")
+            send_message(
+                chat_id,
+                "✅ <b>مدل اصلی و مدل OrcaRouter تنظیم شد.</b>\n\n"
+                f"🐋 مدل: <code>{html_text(model_id)}</code>\n"
+                "🎯 سرویس اصلی: <b>OrcaRouter</b>\n\n"
+                + ("⚠️ کلید OrcaRouter تنظیم نشده است." if not ORCAROUTER_API_KEY else "آماده‌ی تست است.") ,
+                model_management_keyboard()
+            )
+            return
 
     # -----------------------------------------------------
     # REPORT
