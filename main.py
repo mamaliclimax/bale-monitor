@@ -1,4 +1,5 @@
 import os
+import json
 import re
 import time
 import traceback
@@ -71,6 +72,90 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 # اولین مدل Groq که کار کرده (برای جلوگیری از تکرار تست مدل‌های
 # غیرفعال در هر درخواست).
 GROQ_WORKING_MODEL = {"id": None}
+
+# -----------------------------------------------------------
+# 💾 تنظیمات قابل‌تغییر از طریق دستورات ربات (نه فقط env var)
+#
+# روی دیسک ذخیره می‌شود تا مالک ربات هر وقت خواست (بدون نیاز به
+# ری‌دیپلوی یا تغییر env var) بتواند مثلاً مدل متنی Pollinations
+# را عوض کند، و این تنظیم بعد از ری‌استارت هم باقی بماند.
+# -----------------------------------------------------------
+AI_SETTINGS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "ai_settings.json"
+)
+_AI_SETTINGS_CACHE = None
+
+
+def load_ai_settings():
+
+    global _AI_SETTINGS_CACHE
+
+    if _AI_SETTINGS_CACHE is not None:
+        return _AI_SETTINGS_CACHE
+
+    try:
+
+        with open(AI_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            _AI_SETTINGS_CACHE = json.load(f)
+
+    except Exception:
+
+        _AI_SETTINGS_CACHE = {}
+
+    return _AI_SETTINGS_CACHE
+
+
+def save_ai_settings():
+
+    try:
+
+        with open(AI_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                _AI_SETTINGS_CACHE or {},
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+    except Exception as e:
+
+        print(
+            "AI SETTINGS SAVE ERROR:",
+            repr(e)
+        )
+
+
+def get_ai_setting(key, default=None):
+
+    return load_ai_settings().get(key, default)
+
+
+def set_ai_setting(key, value):
+
+    settings = load_ai_settings()
+    settings[key] = value
+    save_ai_settings()
+
+
+# 🌸 Pollinations.ai (متن) - رایگان، بدون نیاز به کلید، به‌عنوان
+# آخرین لایه‌ی پشتیبان بعد از Gemini و Groq استفاده می‌شود. از
+# مدل‌های مختلف (openai، mistral، claude، gemini، deepseek،
+# grok و...) پشتیبانی می‌کند؛ مدل پیش‌فرض با دستور /text_model
+# توسط مالک ربات قابل‌تغییر است (بدون نیاز به ری‌دیپلوی).
+POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/openai"
+POLLINATIONS_MODELS_URL = "https://text.pollinations.ai/models"
+# کلید sk_ اختیاری (از enter.pollinations.ai) - فقط برای نرخ
+# بالاتر/مدل‌های ویژه لازم است، بدونش هم کار می‌کند.
+POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
+
+
+def get_pollinations_text_model():
+
+    return get_ai_setting(
+        "pollinations_text_model",
+        os.environ.get("POLLINATIONS_TEXT_MODEL", "openai")
+    )
 
 # پاسخ صوتی: علاوه بر متن، یک پیام صوتی (Text-to-Speech) هم
 # برای پاسخ ساخته و ارسال می‌شود. با ست کردن AI_VOICE_ENABLED=0
@@ -912,8 +997,139 @@ def ask_groq(prompt, history=None):
     return None
 
 
-# -----------------------------------------------------------
-# 🔎 تشخیص خودکار نیاز به جست‌وجو (حالت GEMINI_SEARCH_MODE=auto)
+def ask_pollinations_text(prompt, history=None, system_prompt=None, model=None):
+    """
+    ارسال یک سوال متنی به Pollinations.ai (رایگان، بدون نیاز به
+    کلید). به‌عنوان آخرین لایه‌ی پشتیبان بعد از Gemini و Groq
+    استفاده می‌شود. مدل پیش‌فرض با get_pollinations_text_model
+    تعیین می‌شود (قابل‌تغییر با دستور /text_model). خروجی None
+    در صورت خطا.
+    """
+
+    if not prompt or not prompt.strip():
+        return None
+
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt or get_groq_system_prompt()
+        }
+    ]
+
+    for item in (history or []):
+
+        role = "assistant" if item.get("role") == "model" else "user"
+
+        messages.append({
+            "role": role,
+            "content": item.get("text", "")
+        })
+
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
+
+    headers = {"Content-Type": "application/json"}
+
+    if POLLINATIONS_API_KEY:
+        headers["Authorization"] = f"Bearer {POLLINATIONS_API_KEY}"
+
+    payload = {
+        "model": model or get_pollinations_text_model(),
+        "messages": messages
+    }
+
+    try:
+
+        response = requests.post(
+            POLLINATIONS_TEXT_URL,
+            headers=headers,
+            json=payload,
+            timeout=60
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "POLLINATIONS TEXT ERROR:",
+                response.status_code,
+                response.text[:400]
+            )
+
+            return None
+
+        data = response.json()
+
+        choices = data.get("choices") or []
+
+        if not choices:
+            return None
+
+        answer = (
+            choices[0]
+            .get("message", {})
+            .get("content", "")
+        ).strip()
+
+        return answer or None
+
+    except Exception as e:
+
+        print(
+            "POLLINATIONS TEXT EXCEPTION:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+        return None
+
+
+def fetch_pollinations_text_models():
+    """
+    لیست زنده‌ی مدل‌های متنی Pollinations را برمی‌گرداند (برای
+    دستور /text_models). خروجی لیست رشته یا [] در صورت خطا.
+    """
+
+    try:
+
+        response = requests.get(
+            POLLINATIONS_MODELS_URL,
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            return []
+
+        data = response.json()
+
+        if isinstance(data, list):
+
+            names = []
+
+            for item in data:
+
+                if isinstance(item, str):
+                    names.append(item)
+                elif isinstance(item, dict):
+                    names.append(item.get("name") or item.get("id") or "")
+
+            return [n for n in names if n]
+
+        return []
+
+    except Exception as e:
+
+        print(
+            "POLLINATIONS MODELS LIST EXCEPTION:",
+            repr(e)
+        )
+
+        return []
+
+
+
 #
 # برای جلوگیری از فعال بودن همیشگی google_search (که هم هزینه
 # دارد و هم زودتر به سقف سهمیه‌ی رایگان می‌خورد)، فقط وقتی سوال
@@ -1359,6 +1575,17 @@ def handle_ai_question(
         )
 
         answer = ask_groq(prompt, history=history)
+
+    if not answer:
+
+        # 🌸 آخرین لایه‌ی پشتیبان: Pollinations.ai (رایگان، بدون
+        # نیاز به کلید) - اگر Gemini و Groq هم جواب ندادند.
+
+        print(
+            "GEMINI+GROQ FAILED, FALLING BACK TO POLLINATIONS TEXT."
+        )
+
+        answer = ask_pollinations_text(prompt, history=history)
 
     if not answer:
 
@@ -2149,6 +2376,289 @@ def check_command_access(chat, requester_id, message_id):
     return False
 
 
+EDIT_IMAGE_COMMANDS = ("/edit_image", "/ویرایش", "/ویرایش_عکس", "/edit")
+
+
+def get_bale_file_download_url(file_id):
+    """
+    با گرفتن file_id یک فایل (مثلاً عکس)، از بله آدرس دانلود
+    موقت آن را می‌گیرد. این آدرس شامل توکن ربات است و فقط برای
+    مدت کوتاهی (طبق مستندات مشابه تلگرام، حدود ۱ ساعت) معتبر
+    می‌ماند. خروجی None در صورت خطا.
+    """
+
+    if not file_id:
+        return None
+
+    result = bale_request(
+        "getFile",
+        {"file_id": file_id}
+    )
+
+    if not result:
+        return None
+
+    file_path = result.get("file_path")
+
+    if not file_path:
+        return None
+
+    return f"https://tapi.bale.ai/file/bot{BALE_TOKEN}/{file_path}"
+
+
+def get_largest_photo_file_id(photo_sizes):
+    """
+    از لیست اندازه‌های مختلف یک عکس (که بله/تلگرام برمی‌گرداند)،
+    file_id بزرگ‌ترین اندازه را برمی‌گرداند.
+    """
+
+    if not photo_sizes:
+        return None
+
+    try:
+
+        largest = max(
+            photo_sizes,
+            key=lambda p: (p.get("width", 0) * p.get("height", 0))
+        )
+
+        return largest.get("file_id")
+
+    except Exception:
+
+        return photo_sizes[-1].get("file_id")
+
+
+def get_photo_file_id_from_message_or_reply(message):
+    """
+    اگر خودِ پیام عکس داشته باشد (مثلاً عکس با کپشن دستور)، یا
+    پیامی که روی آن ریپلای شده عکس داشته باشد، file_id آن را
+    برمی‌گرداند. در غیر این صورت None.
+    """
+
+    photo = message.get("photo")
+
+    if photo:
+        return get_largest_photo_file_id(photo)
+
+    reply = message.get("reply_to_message") or {}
+
+    reply_photo = reply.get("photo")
+
+    if reply_photo:
+        return get_largest_photo_file_id(reply_photo)
+
+    return None
+
+
+def get_edit_instruction_from_command(text, bot_username):
+    """
+    مثل get_news_text_from_command: اگر پیام با یکی از دستورات
+    ویرایش عکس شروع شده باشد، توضیح ویرایش (هر چه بعد از دستور
+    آمده) را برمی‌گرداند. اگر فقط خودِ دستور بود، رشته‌ی خالی. اگر
+    اصلاً با این دستورها شروع نشده، None.
+    """
+
+    if not text:
+        return None
+
+    stripped = text.strip()
+
+    first_word = stripped.split(" ", 1)[0]
+    rest = (
+        stripped.split(" ", 1)[1]
+        if " " in stripped else ""
+    ).strip()
+
+    if bot_username and "@" in first_word:
+        first_word = first_word.split("@", 1)[0]
+
+    if first_word.lower() not in EDIT_IMAGE_COMMANDS:
+        return None
+
+    return rest
+
+
+def generate_kontext_edit(image_url, instruction):
+    """
+    ویرایش یک عکس موجود با مدل kontext در Pollinations.ai، طبق
+    یک دستور متنی (مثلاً «این را آبرنگ کن»). قبل از ارسال، اگر
+    دستور فارسی باشد به انگلیسی ترجمه می‌شود. خروجی مسیر فایل
+    موقت jpg یا None در صورت خطا. فایل موقت باید توسط فراخوان
+    حذف شود.
+    """
+
+    if not image_url or not instruction or not instruction.strip():
+        return None
+
+    instruction = translate_prompt_to_english(instruction)
+
+    try:
+
+        from urllib.parse import quote
+
+        encoded_instruction = quote(instruction.strip())
+        encoded_image_url = quote(image_url, safe="")
+
+        url = (
+            f"https://image.pollinations.ai/prompt/{encoded_instruction}"
+            f"?model=kontext&image={encoded_image_url}"
+            f"&width=1024&height=1024&nologo=true&safe=true"
+        )
+
+        response = requests.get(url, timeout=120)
+
+        if response.status_code != 200:
+
+            print(
+                "KONTEXT EDIT ERROR:",
+                response.status_code,
+                response.text[:400]
+            )
+
+            return None
+
+        content_type = response.headers.get("Content-Type", "")
+
+        if "image" not in content_type:
+
+            print(
+                "KONTEXT EDIT: unexpected content-type:",
+                content_type,
+                response.text[:300]
+            )
+
+            return None
+
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=".jpg",
+            delete=False
+        )
+
+        tmp.write(response.content)
+        tmp.close()
+
+        return tmp.name
+
+    except Exception as e:
+
+        print(
+            "KONTEXT EDIT EXCEPTION:",
+            repr(e)
+        )
+
+        traceback.print_exc()
+
+        return None
+
+
+def handle_edit_image_command(message, chat, bot_username):
+    """
+    اگر پیام دستور ویرایش عکس باشد (/edit_image، /ویرایش،
+    /ویرایش_عکس یا /edit)، عکس هدف را (خودِ پیام یا پیام
+    ریپلای‌شده) با مدل kontext ویرایش می‌کند. خروجی True یعنی
+    پیام پردازش شد.
+
+    ⚠️ نکته‌ی امنیتی: آدرس دانلود عکس از بله شامل توکن ربات است
+    و برای گرفتن جواب از Pollinations، این آدرس به سرور آن‌ها
+    فرستاده می‌شود. این آدرس کوتاه‌عمر است (حدود ۱ ساعت) ولی
+    بازهم یعنی یک سرویس ثالث آن را می‌بیند - ریسک کوچک ولی
+    واقعی است.
+    """
+
+    text = (message.get("text") or message.get("caption") or "").strip()
+
+    instruction = get_edit_instruction_from_command(text, bot_username)
+
+    if instruction is None:
+        return False
+
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    from_user = message.get("from") or {}
+    requester_id = from_user.get("id")
+
+    if not check_command_access(chat, requester_id, message_id):
+        return True
+
+    file_id = get_photo_file_id_from_message_or_reply(message)
+
+    if not file_id:
+
+        send_message(
+            chat_id,
+            "روی یک <b>عکس</b> ریپلای کن و بنویس "
+            "<code>/ویرایش توضیح تغییر</code>، یا خودِ عکس را با "
+            "همین کپشن بفرست.",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
+    if not instruction:
+
+        send_message(
+            chat_id,
+            "بگو چطور می‌خوای عکس ویرایش بشه، مثلاً:\n"
+            "<code>/ویرایش این را آبرنگ کن</code>",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
+    image_url = get_bale_file_download_url(file_id)
+
+    if not image_url:
+
+        send_message(
+            chat_id,
+            "متاسفانه نتونستم عکس رو از بله بگیرم، دوباره امتحان کن.",
+            reply_to_message_id=message_id
+        )
+
+        return True
+
+    send_message(
+        chat_id,
+        "🖌 در حال ویرایش عکس...",
+        reply_to_message_id=message_id
+    )
+
+    result_path = None
+
+    try:
+
+        result_path = generate_kontext_edit(image_url, instruction)
+
+        if not result_path:
+
+            send_message(
+                chat_id,
+                "متاسفانه ویرایش عکس انجام نشد، دوباره امتحان کن.",
+                reply_to_message_id=message_id
+            )
+
+            return True
+
+        send_photo_file(
+            chat_id,
+            result_path,
+            reply_to_message_id=message_id
+        )
+
+    finally:
+
+        if result_path and os.path.exists(result_path):
+
+            try:
+                os.remove(result_path)
+            except Exception:
+                pass
+
+    return True
+
+
 def handle_image_command(message, chat, bot_username):
     """
     اگر پیام دستور ساخت عکس باشد (/image یا /عکس)، عکس را با
@@ -2530,6 +3040,14 @@ def ask_gemini_with_system(system_prompt, user_text):
             GEMINI_LAST_ERROR.get("status"),
         )
         answer = ask_groq_with_system(system_prompt, user_text)
+
+    # 🌸 آخرین لایه‌ی پشتیبان: Pollinations.ai (رایگان)
+    if not answer:
+        print("GEMINI+GROQ TEXT-TOOL FAILED, FALLING BACK TO POLLINATIONS.")
+        answer = ask_pollinations_text(
+            user_text,
+            system_prompt=system_prompt
+        )
 
     return answer or None
 
@@ -5570,6 +6088,15 @@ def process_channel_message(message):
                 ):
                     return
 
+                # 🖌 ویرایش عکس (/ویرایش یا /edit_image) - با ریپلای
+                # روی یک عکس استفاده می‌شود.
+                if handle_edit_image_command(
+                    message,
+                    chat,
+                    bot_username
+                ):
+                    return
+
                 if chat_type in ("group", "supergroup"):
 
                     handle_ai_question(
@@ -7326,6 +7853,10 @@ def send_help(chat_id, user_id):
         "🔹 <b>ساخت عکس</b>\n"
         "<code>/image</code> یا <code>/عکس</code> "
         "+ توضیح عکس موردنظر\n\n"
+        "🔹 <b>ویرایش عکس</b>\n"
+        "<code>/ویرایش</code> یا <code>/edit_image</code>\n"
+        "روی یک عکس ریپلای کن و بنویس چطور تغییرش بدی (مثلاً "
+        "«این را آبرنگ کن»)، یا خودِ عکس را با همین کپشن بفرست.\n\n"
         "🔹 <b>خلاصه‌سازی</b>\n"
         "<code>/خلاصه</code> یا <code>/summary</code>\n"
         "روی متن بلند ریپلای کن، یا متن را بعد از دستور بنویس.\n\n"
@@ -7367,7 +7898,12 @@ def send_help(chat_id, user_id):
         "<code>/removeadmin USER_ID</code>\n\n"
         "🔹 <b>حذف کامل همه‌ی گزارش‌ها</b>\n"
         "<code>/clearreports</code>\n"
-        "⚠️ غیرقابل‌بازگشت است."
+        "⚠️ غیرقابل‌بازگشت است.\n\n"
+        "🔹 <b>مدل متنی پشتیبان (Pollinations)</b>\n"
+        "<code>/text_model اسم_مدل</code> برای تغییر\n"
+        "<code>/text_models</code> برای دیدن لیست مدل‌ها\n"
+        "این مدل فقط وقتی استفاده می‌شه که Gemini و Groq هر دو "
+        "جواب ندن (آخرین لایه‌ی پشتیبان، رایگان)."
     )
 
     if is_owner(user_id):
@@ -7745,6 +8281,84 @@ def handle_command(
             "اگر ربات جمله‌ی «اطلاعاتم تا فلان تاریخه» را تکرار "
             "می‌کرد، از این به بعد نباید دوباره تکرار شود.",
             main_keyboard(user_id)
+        )
+
+        return True
+
+    if command.startswith("/text_models"):
+
+        if not is_owner(user_id):
+
+            send_message(
+                chat_id,
+                "⛔ این دستور فقط برای مالک ربات است."
+            )
+
+            return True
+
+        models = fetch_pollinations_text_models()
+        current = get_pollinations_text_model()
+
+        if not models:
+
+            send_message(
+                chat_id,
+                "نتونستم لیست مدل‌ها رو از Pollinations بگیرم، "
+                "بعداً امتحان کن."
+            )
+
+            return True
+
+        models_text = "، ".join(
+            f"<code>{html_text(m)}</code>" for m in models[:60]
+        )
+
+        send_message(
+            chat_id,
+            f"🌸 <b>مدل‌های متنی Pollinations</b> "
+            f"(فعلی: <code>{html_text(current)}</code>):\n\n"
+            f"{models_text}\n\n"
+            "برای تغییر: <code>/text_model اسم_مدل</code>"
+        )
+
+        return True
+
+    if command.startswith("/text_model"):
+
+        if not is_owner(user_id):
+
+            send_message(
+                chat_id,
+                "⛔ این دستور فقط برای مالک ربات است."
+            )
+
+            return True
+
+        rest_parts = text.strip().split(" ", 1)
+        new_model = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+
+        if not new_model:
+
+            current = get_pollinations_text_model()
+
+            send_message(
+                chat_id,
+                f"مدل متنی فعلی Pollinations: "
+                f"<code>{html_text(current)}</code>\n\n"
+                "برای تغییر: <code>/text_model اسم_مدل</code>\n"
+                "برای دیدن لیست مدل‌ها: <code>/text_models</code>"
+            )
+
+            return True
+
+        set_ai_setting("pollinations_text_model", new_model)
+
+        send_message(
+            chat_id,
+            f"✅ مدل متنی پیش‌فرض Pollinations به "
+            f"<code>{html_text(new_model)}</code> تغییر کرد.\n\n"
+            "نکته: این لایه فقط وقتی استفاده می‌شه که Gemini و "
+            "Groq هر دو جواب ندن (لایه‌ی سوم پشتیبان)."
         )
 
         return True
@@ -9414,6 +10028,35 @@ def process_private_message(message):
             bot_username = None
 
         if handle_voice_command(
+            message,
+            chat,
+            bot_username
+        ):
+            return
+
+    # -----------------------------------------------------
+    # EDIT IMAGE COMMAND (/ویرایش یا /edit_image)
+    #
+    # ممکن است این دستور به‌صورت کپشن روی خودِ عکس بیاید (که در
+    # این صورت message["text"] خالی است و caption باید بررسی
+    # شود)، پس شرط شروع این بخش وسیع‌تر از فقط text.startswith
+    # است.
+    # -----------------------------------------------------
+
+    caption = (message.get("caption") or "").strip()
+
+    if text.startswith("/") or caption.startswith("/"):
+
+        try:
+
+            bot = get_me()
+            bot_username = bot.get("username") if bot else None
+
+        except Exception:
+
+            bot_username = None
+
+        if handle_edit_image_command(
             message,
             chat,
             bot_username
