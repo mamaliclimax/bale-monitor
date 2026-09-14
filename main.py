@@ -107,6 +107,8 @@ AI_SETTING_KEYS = {
     "primary_ai_provider",
     "orcarouter_model",
     "pollinations_text_model",
+    "pollinations_image_model",
+    "pollinations_video_model",
 }
 
 
@@ -260,6 +262,8 @@ POLLINATIONS_MODELS_URL = "https://gen.pollinations.ai/v1/models"
 # کلید sk_ اختیاری (از enter.pollinations.ai) - فقط برای نرخ
 # بالاتر/مدل‌های ویژه لازم است، بدونش هم کار می‌کند.
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
+POLLINATIONS_IMAGE_MODELS_URL = "https://gen.pollinations.ai/image/models"
+POLLINATIONS_IMAGE_GENERATIONS_URL = "https://gen.pollinations.ai/v1/images/generations"
 
 
 def get_pollinations_text_model():
@@ -267,6 +271,22 @@ def get_pollinations_text_model():
     return get_ai_setting(
         "pollinations_text_model",
         os.environ.get("POLLINATIONS_TEXT_MODEL", "openai")
+    )
+
+
+def get_pollinations_image_model():
+
+    return get_ai_setting(
+        "pollinations_image_model",
+        os.environ.get("POLLINATIONS_IMAGE_MODEL", "flux")
+    )
+
+
+def get_pollinations_video_model():
+
+    return get_ai_setting(
+        "pollinations_video_model",
+        os.environ.get("POLLINATIONS_VIDEO_MODEL", "veo")
     )
 
 # پاسخ صوتی: علاوه بر متن، یک پیام صوتی (Text-to-Speech) هم
@@ -1231,6 +1251,119 @@ def fetch_pollinations_text_models():
         print("POLLINATIONS MODELS LIST EXCEPTION:", repr(e))
         traceback.print_exc()
         return []
+
+
+def fetch_pollinations_image_models():
+    """فهرست زنده مدل‌های تصویر Pollinations را از API رسمی می‌گیرد."""
+    try:
+        response = requests.get(POLLINATIONS_IMAGE_MODELS_URL, timeout=15)
+        if response.status_code != 200:
+            print("POLLINATIONS IMAGE MODELS ERROR:", response.status_code, response.text[:300])
+            return []
+        data = response.json()
+        items = data.get("data", []) if isinstance(data, dict) else data
+        names = []
+        for item in items or []:
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(item.get("id") or item.get("name") or "").strip()
+            else:
+                name = ""
+            if name and name not in names:
+                names.append(name)
+        return names
+    except Exception as e:
+        print("POLLINATIONS IMAGE MODELS EXCEPTION:", repr(e))
+        traceback.print_exc()
+        return []
+
+
+def pollinations_image_model_keyboard(models=None):
+    models = models if models is not None else fetch_pollinations_image_models()
+    current = str(get_pollinations_image_model() or "flux").strip()
+    visible = models[:40]
+    keyboard = []
+    for i in range(0, len(visible), 2):
+        row = []
+        for model_id in visible[i:i+2]:
+            label = ("✅ " if model_id == current else "") + model_id
+            if len(label) > 30:
+                label = label[:29] + "…"
+            row.append({"text": label, "callback_data": "pollimagemodel:" + model_id})
+        keyboard.append(row)
+    keyboard.append([{"text": "🔄 دریافت دوباره فهرست مدل‌ها", "callback_data": "pollimagemodel:__refresh__"}])
+    keyboard.append([{"text": "⬅️ بازگشت به پنل مدل‌ها", "callback_data": "pollimagemodel:__back__"}])
+    return {"inline_keyboard": keyboard}
+
+
+def pollinations_image_model_panel_text(models=None):
+    current = str(get_pollinations_image_model() or "flux").strip()
+    count = len(models or [])
+    return (
+        "🖼 <b>مدل‌های تصویر Pollinations</b>\n\n"
+        "مدل تصویر را انتخاب کنید؛ فهرست به‌صورت زنده از API دریافت می‌شود.\n\n"
+        f"🎯 <b>مدل فعلی:</b> <code>{html_text(current)}</code>\n"
+        f"📚 <b>تعداد مدل‌های شناسایی‌شده:</b> {count}\n\n"
+        f"🔐 کلید Pollinations: {'✅ تنظیم شده' if POLLINATIONS_API_KEY else '⚪ تنظیم نشده'}\n"
+        "⚠️ مدل‌های جدید API ممکن است به کلید و سهمیه نیاز داشته باشند."
+    )
+
+
+def _is_video_model_item(item):
+    if not isinstance(item, dict):
+        return False
+    modalities = item.get("outputModalities") or item.get("output_modalities") or item.get("modalities") or []
+    if isinstance(modalities, str):
+        modalities = [modalities]
+    text = " ".join(str(x).lower() for x in modalities)
+    model_id = str(item.get("id") or item.get("name") or "").lower()
+    return "video" in text or any(x in model_id for x in ("veo", "seedance", "wan", "nova-reel"))
+
+
+def fetch_pollinations_video_models():
+    try:
+        response = requests.get(POLLINATIONS_IMAGE_MODELS_URL, timeout=15)
+        if response.status_code != 200:
+            print("POLLINATIONS VIDEO MODELS ERROR:", response.status_code, response.text[:300]); return []
+        data = response.json(); items = data.get("data", []) if isinstance(data, dict) else data
+        names=[]
+        for item in items or []:
+            if isinstance(item, str):
+                name=item.strip()
+            elif isinstance(item, dict) and _is_video_model_item(item):
+                name=str(item.get("id") or item.get("name") or "").strip()
+            else:
+                name=""
+            if name and name not in names: names.append(name)
+        return names
+    except Exception as e:
+        print("POLLINATIONS VIDEO MODELS EXCEPTION:", repr(e)); traceback.print_exc(); return []
+
+
+def pollinations_video_model_keyboard(models=None):
+    models = models if models is not None else fetch_pollinations_video_models(); current=str(get_pollinations_video_model() or "veo").strip(); visible=models[:30]
+    keyboard=[]
+    for i in range(0,len(visible),2):
+        row=[]
+        for model_id in visible[i:i+2]:
+            label=("✅ " if model_id==current else "")+model_id
+            if len(label)>30: label=label[:29]+"…"
+            row.append({"text":label,"callback_data":"pollvideomodel:"+model_id})
+        keyboard.append(row)
+    keyboard.append([{"text":"🔄 تازه‌سازی فهرست ویدئو","callback_data":"pollvideomodel:__refresh__"}])
+    keyboard.append([{"text":"⬅️ بازگشت به پنل مدل‌ها","callback_data":"pollvideomodel:__back__"}])
+    return {"inline_keyboard":keyboard}
+
+
+def pollinations_video_model_panel_text(models=None):
+    current=str(get_pollinations_video_model() or "veo").strip(); count=len(models or [])
+    return ("🎬 <b>مدل‌های ویدئویی Pollinations</b>\n\n"
+            "مدل ویدئو را انتخاب کنید؛ فهرست به‌صورت زنده دریافت می‌شود.\n\n"
+            f"🎯 <b>مدل فعلی:</b> <code>{html_text(current)}</code>\n"
+            f"📚 <b>تعداد مدل‌ها:</b> {count}\n"
+            f"🔐 کلید Pollinations: {'✅ تنظیم شده' if POLLINATIONS_API_KEY else '⚪ تنظیم نشده'}\n"
+            "⚠️ تولید ویدئو در API جدید به احراز هویت و سهمیه نیاز دارد.")
 
 
 def pollinations_model_keyboard(models=None):
@@ -2402,57 +2535,51 @@ def generate_cloudflare_image(prompt):
         return None
 
 
-def generate_pollinations_image(prompt):
-    """
-    ساخت عکس از روی متن با Pollinations.ai (رایگان، بدون نیاز
-    به کلید API). خروجی مسیر یک فایل موقت jpg است یا None در
-    صورت خطا. فایل موقت باید توسط فراخوان حذف شود.
-    """
-
+def generate_pollinations_image(prompt, model=None):
+    """ساخت تصویر با مدل انتخابی Pollinations؛ API جدید + fallback legacy."""
     if not prompt or not prompt.strip():
         return None
+    model = model or get_pollinations_image_model()
+
+    if POLLINATIONS_API_KEY:
+        try:
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {POLLINATIONS_API_KEY}"}
+            payload = {"model": model, "prompt": prompt.strip(), "size": "1024x1024", "n": 1}
+            response = requests.post(POLLINATIONS_IMAGE_GENERATIONS_URL, headers=headers, json=payload, timeout=120)
+            if response.status_code == 200:
+                data = response.json(); items = data.get("data") or []
+                if items:
+                    item = items[0] or {}; image_b64 = item.get("b64_json"); image_url = item.get("url")
+                    if image_b64:
+                        import base64
+                        if image_b64.startswith("data:") and "," in image_b64:
+                            image_b64 = image_b64.split(",", 1)[1]
+                        image_bytes = base64.b64decode(image_b64)
+                        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False); tmp.write(image_bytes); tmp.close()
+                        print("✅ POLLINATIONS IMAGE MODEL:", model); return tmp.name
+                    if image_url:
+                        image_response = requests.get(image_url, timeout=120)
+                        if image_response.status_code == 200 and image_response.content:
+                            tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False); tmp.write(image_response.content); tmp.close()
+                            print("✅ POLLINATIONS IMAGE MODEL:", model); return tmp.name
+            print("POLLINATIONS IMAGE API ERROR:", response.status_code, response.text[:500])
+        except Exception as e:
+            print("POLLINATIONS IMAGE API EXCEPTION:", repr(e)); traceback.print_exc()
 
     try:
-
         from urllib.parse import quote
-
         encoded_prompt = quote(prompt.strip())
-
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-            f"?width=1024&height=1024&nologo=true&safe=true"
-        )
-
-        response = requests.get(url, timeout=90)
-
+        url = f"https://gen.pollinations.ai/image/{encoded_prompt}?model={quote(str(model))}&width=1024&height=1024&safe=true"
+        headers = {"Authorization": f"Bearer {POLLINATIONS_API_KEY}"} if POLLINATIONS_API_KEY else {}
+        response = requests.get(url, headers=headers, timeout=120)
         if response.status_code != 200:
-
-            print(
-                "POLLINATIONS ERROR:",
-                response.status_code,
-                response.text[:300]
-            )
-
+            print("POLLINATIONS LEGACY ERROR:", response.status_code, response.text[:300]); return None
+        if "image" not in response.headers.get("Content-Type", "") and len(response.content) < 1000:
             return None
-
-        tmp = tempfile.NamedTemporaryFile(
-            suffix=".jpg",
-            delete=False
-        )
-
-        tmp.write(response.content)
-        tmp.close()
-
-        return tmp.name
-
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False); tmp.write(response.content); tmp.close()
+        print("✅ POLLINATIONS LEGACY IMAGE MODEL:", model); return tmp.name
     except Exception as e:
-
-        print(
-            "POLLINATIONS EXCEPTION:",
-            repr(e)
-        )
-
-        return None
+        print("POLLINATIONS LEGACY IMAGE EXCEPTION:", repr(e)); traceback.print_exc(); return None
 
 
 def generate_image(prompt):
@@ -2472,7 +2599,7 @@ def generate_image(prompt):
         return image_path
 
     print("↪️ FALLBACK TO POLLINATIONS")
-    return generate_pollinations_image(prompt)
+    return generate_pollinations_image(prompt, get_pollinations_image_model())
 
 
 
@@ -2545,6 +2672,76 @@ def send_photo_file(
         )
 
         return None
+
+
+def generate_pollinations_video(prompt, model=None, duration=6, aspect_ratio="9:16"):
+    """تولید ویدئو از Pollinations با مدل انتخابی."""
+    if not prompt or not prompt.strip() or not POLLINATIONS_API_KEY:
+        if not POLLINATIONS_API_KEY:
+            print("POLLINATIONS VIDEO: API key is required")
+        return None
+    model=model or get_pollinations_video_model()
+    try:
+        from urllib.parse import quote
+        params=(f"model={quote(str(model))}&duration={int(duration)}&aspectRatio={quote(str(aspect_ratio))}&width=720&height=1280")
+        url=f"https://gen.pollinations.ai/video/{quote(prompt.strip())}?{params}"
+        response=requests.get(url, headers={"Authorization":f"Bearer {POLLINATIONS_API_KEY}"}, timeout=300)
+        if response.status_code!=200:
+            print("POLLINATIONS VIDEO ERROR:",response.status_code,response.text[:500]); return None
+        tmp=tempfile.NamedTemporaryFile(suffix=".mp4",delete=False); tmp.write(response.content); tmp.close()
+        print("✅ POLLINATIONS VIDEO MODEL:",model); return tmp.name
+    except Exception as e:
+        print("POLLINATIONS VIDEO EXCEPTION:",repr(e)); traceback.print_exc(); return None
+
+
+def send_video_file(chat_id, file_path, caption=None, reply_to_message_id=None):
+    url=f"{BALE_API}/sendVideo"; data={"chat_id":str(chat_id)}
+    if caption: data["caption"]=caption
+    if reply_to_message_id: data["reply_to_message_id"]=reply_to_message_id
+    try:
+        with open(file_path,"rb") as f:
+            response=requests.post(url,data=data,files={"video":f},timeout=180)
+        result=response.json()
+        if not result.get("ok"):
+            print("BALE sendVideo ERROR:",result); return None
+        return result.get("result")
+    except Exception as e:
+        print("BALE sendVideo EXCEPTION:",repr(e)); return None
+
+
+VIDEO_COMMANDS=("/video","/ویدئو","/ویدیو","/فیلم")
+
+def get_video_prompt_from_text(text, bot_username):
+    if not text: return None
+    stripped=text.strip(); first=stripped.split(" ",1)[0]; rest=stripped.split(" ",1)[1].strip() if " " in stripped else ""
+    if bot_username and "@" in first: first=first.split("@",1)[0]
+    return rest or None if first.lower() in VIDEO_COMMANDS else None
+
+
+def handle_video_command(message, chat, bot_username):
+    text=(message.get("text") or "").strip(); first=text.split(" ",1)[0].split("@",1)[0].lower() if text else ""
+    if first not in VIDEO_COMMANDS: return False
+    chat_id=chat.get("id"); message_id=message.get("message_id"); requester_id=(message.get("from") or {}).get("id")
+    if not check_command_access(chat,requester_id,message_id): return True
+    prompt=get_video_prompt_from_text(text,bot_username)
+    if not prompt:
+        send_message(chat_id,"لطفاً بعد از دستور /video توضیح ویدئو را بنویس.",reply_to_message_id=message_id); return True
+    if not POLLINATIONS_API_KEY:
+        send_message(chat_id,"⚠️ تولید ویدئو با Pollinations نیاز به <b>POLLINATIONS_API_KEY</b> دارد.",reply_to_message_id=message_id); return True
+    if not is_image_prompt_safe(prompt):
+        send_message(chat_id,"🚫 این درخواست مناسب ساخت ویدئو نیست.",reply_to_message_id=message_id); return True
+    send_message(chat_id,"⏳ در حال ساخت ویدئو با Pollinations...",reply_to_message_id=message_id)
+    path=None
+    try:
+        path=generate_pollinations_video(translate_prompt_to_english(prompt))
+        if not path:
+            send_message(chat_id,"❌ ساخت ویدئو ناموفق بود؛ لاگ API را بررسی کن.",reply_to_message_id=message_id); return True
+        send_video_file(chat_id,path,caption=html_text(prompt),reply_to_message_id=message_id)
+    finally:
+        if path and os.path.exists(path):
+            try: os.remove(path)
+            except Exception: pass
+    return True
 
 
 def is_image_prompt_safe(prompt):
@@ -3943,6 +4140,12 @@ def model_management_keyboard():
                 {"text": "🌸 انتخاب مدل Pollinations", "callback_data": "modelpoll:list"}
             ],
             [
+                {"text": "🖼 انتخاب مدل تصویر Pollinations", "callback_data": "modelimage:list"}
+            ],
+            [
+                {"text": "🎬 انتخاب مدل ویدئو Pollinations", "callback_data": "modelvideo:list"}
+            ],
+            [
                 {"text": "🐋 Hy3 رایگان", "callback_data": "modelorca:tencent/hy3-free"},
                 {"text": "🔀 روتر رایگان", "callback_data": "modelorca:orcarouter/free"}
             ],
@@ -3960,12 +4163,14 @@ def model_management_text():
     provider = get_primary_ai_provider()
     orca_model = get_selected_orcarouter_model()
     poll_model = get_pollinations_text_model()
+    poll_image_model = get_pollinations_image_model()
+    poll_video_model = get_pollinations_video_model()
 
     availability = [
         f"Gemini: {'✅ فعال' if GEMINI_API_KEY else '⚪ کلید ندارد'}",
         f"OrcaRouter: {'✅ فعال' if ORCAROUTER_API_KEY else '⚪ کلید ندارد'}",
         f"Groq: {'✅ فعال' if GROQ_API_KEY else '⚪ کلید ندارد'}",
-        "Pollinations: ✅ بدون کلید"
+        f"Pollinations: {'✅ کلید دارد' if POLLINATIONS_API_KEY else '⚪ بدون کلید (مدل‌های API جدید محدودند)'}"
     ]
 
     return (
@@ -3974,7 +4179,9 @@ def model_management_text():
         "در صورت خطای مدل اصلی، ربات از مسیرهای پشتیبان استفاده می‌کند.\n\n"
         f"🎯 <b>انتخاب فعلی:</b> {html_text(primary_ai_label(provider))}\n"
         f"🐋 <b>مدل OrcaRouter:</b> <code>{html_text(orca_model)}</code>\n"
-        f"🌸 <b>مدل Pollinations:</b> <code>{html_text(poll_model)}</code>\n\n"
+        f"🌸 <b>مدل متن Pollinations:</b> <code>{html_text(poll_model)}</code>\n"
+        f"🖼 <b>مدل تصویر Pollinations:</b> <code>{html_text(poll_image_model)}</code>\n"
+        f"🎬 <b>مدل ویدئو Pollinations:</b> <code>{html_text(poll_video_model)}</code>\n\n"
         "📡 <b>وضعیت کلیدها:</b>\n"
         + "\n".join(f"• {x}" for x in availability)
         + "\n\n⚠️ مدل‌های رایگان ممکن است محدودیت نرخ درخواست داشته باشند."
@@ -6385,6 +6592,10 @@ def process_channel_message(message):
                 bot_id = bot.get("id") if bot else None
                 bot_username = bot.get("username") if bot else None
 
+                # 🎬 دستور ساخت ویدئو
+                if handle_video_command(message, chat, bot_username):
+                    return
+
                 # 🖼 دستور ساخت عکس (/image یا /عکس)
                 if handle_image_command(
                     message,
@@ -8705,6 +8916,46 @@ def handle_command(
         )
         return True
 
+    if command.startswith("/video_models"):
+        if not is_owner(user_id): send_message(chat_id,"⛔ این دستور فقط برای مالک ربات است."); return True
+        models=fetch_pollinations_video_models(); current=get_pollinations_video_model()
+        if not models: send_message(chat_id,"❌ فهرست مدل‌های ویدئو دریافت نشد."); return True
+        send_message(chat_id,"🎬 <b>مدل‌های ویدئو Pollinations</b>\n\n" f"مدل فعلی: <code>{html_text(current)}</code>\n\n" + "، ".join(f"<code>{html_text(m)}</code>" for m in models[:60]) + "\n\nبرای تغییر: <code>/video_model اسم_مدل</code>"); return True
+
+    if command.startswith("/video_model"):
+        if not is_owner(user_id): send_message(chat_id,"⛔ این دستور فقط برای مالک ربات است."); return True
+        parts2=text.strip().split(" ",1); new_model=parts2[1].strip() if len(parts2)>1 else ""
+        if not new_model: send_message(chat_id,f"🎬 مدل ویدئوی فعلی: <code>{html_text(get_pollinations_video_model())}</code>"); return True
+        models=fetch_pollinations_video_models()
+        if models and new_model not in models: send_message(chat_id,"❌ این مدل در فهرست فعلی نیست."); return True
+        if set_ai_setting("pollinations_video_model",new_model): send_message(chat_id,f"✅ مدل ویدئو روی <code>{html_text(new_model)}</code> تنظیم شد.")
+        else: send_message(chat_id,"❌ ذخیره مدل ویدئو ناموفق بود.")
+        return True
+
+    if command.startswith("/image_models"):
+        if not is_owner(user_id):
+            send_message(chat_id, "⛔ این دستور فقط برای مالک ربات است."); return True
+        models = fetch_pollinations_image_models(); current = get_pollinations_image_model()
+        if not models:
+            send_message(chat_id, "❌ فهرست مدل‌های تصویر Pollinations دریافت نشد."); return True
+        send_message(chat_id, "🖼 <b>مدل‌های تصویر Pollinations</b>\n\n" f"مدل فعلی: <code>{html_text(current)}</code>\n\n" + "، ".join(f"<code>{html_text(m)}</code>" for m in models[:60]) + "\n\nبرای تغییر: <code>/image_model اسم_مدل</code>")
+        return True
+
+    if command.startswith("/image_model"):
+        if not is_owner(user_id):
+            send_message(chat_id, "⛔ این دستور فقط برای مالک ربات است."); return True
+        parts2 = text.strip().split(" ", 1); new_model = parts2[1].strip() if len(parts2) > 1 else ""
+        if not new_model:
+            send_message(chat_id, f"🖼 مدل تصویر فعلی Pollinations: <code>{html_text(get_pollinations_image_model())}</code>\n\nبرای تغییر: <code>/image_model اسم_مدل</code>"); return True
+        models = fetch_pollinations_image_models()
+        if models and new_model not in models:
+            send_message(chat_id, "❌ این مدل در فهرست فعلی Pollinations نیست."); return True
+        if set_ai_setting("pollinations_image_model", new_model):
+            send_message(chat_id, f"✅ مدل تصویر Pollinations روی <code>{html_text(new_model)}</code> تنظیم شد.")
+        else:
+            send_message(chat_id, "❌ ذخیره مدل تصویر ناموفق بود.")
+        return True
+
     if command.startswith("/text_models"):
 
         if not is_owner(user_id):
@@ -9689,7 +9940,7 @@ def process_callback_query(callback_query):
     # 🤖 پنل مدیریت مدل‌ها - فقط مالک
     # -----------------------------------------------------
 
-    if data.startswith("modelpanel:") or data.startswith("modelprov:") or data.startswith("modelorca:") or data.startswith("modelpoll:") or data.startswith("pollmodel:"):
+    if data.startswith("modelpanel:") or data.startswith("modelprov:") or data.startswith("modelorca:") or data.startswith("modelpoll:") or data.startswith("pollmodel:") or data.startswith("modelimage:") or data.startswith("pollimagemodel:") or data.startswith("modelvideo:") or data.startswith("pollvideomodel:"):
 
         if not is_owner(user_id):
             if callback_id:
@@ -9702,6 +9953,48 @@ def process_callback_query(callback_query):
 
         if data == "modelpanel:refresh":
             send_model_management_panel(chat_id)
+            return
+
+        if data == "modelimage:list":
+            models = fetch_pollinations_image_models()
+            if not models:
+                send_message(chat_id, "❌ فهرست مدل‌های تصویر Pollinations دریافت نشد.", model_management_keyboard())
+                return
+            send_message(chat_id, pollinations_image_model_panel_text(models), pollinations_image_model_keyboard(models))
+            return
+
+        if data.startswith("pollimagemodel:"):
+            action = data.split(":", 1)[1].strip()
+            if action == "__back__":
+                send_model_management_panel(chat_id); return
+            models = fetch_pollinations_image_models()
+            if action == "__refresh__":
+                send_message(chat_id, pollinations_image_model_panel_text(models), pollinations_image_model_keyboard(models)); return
+            if action not in models:
+                if callback_id: answer_callback_query(callback_id, "❌ این مدل دیگر در فهرست Pollinations نیست.", True)
+                return
+            if set_ai_setting("pollinations_image_model", action):
+                send_message(chat_id, "✅ <b>مدل تصویر Pollinations انتخاب شد.</b>\n\n" f"🖼 مدل: <code>{html_text(action)}</code>\n" "🎯 از این مدل برای /image استفاده می‌شود.", pollinations_image_model_keyboard(models))
+            else:
+                send_message(chat_id, "❌ ذخیره مدل تصویر ناموفق بود.", pollinations_image_model_keyboard(models))
+            return
+
+        if data == "modelvideo:list":
+            models=fetch_pollinations_video_models()
+            if not models:
+                send_message(chat_id,"❌ فهرست مدل‌های ویدئو دریافت نشد.",model_management_keyboard()); return
+            send_message(chat_id,pollinations_video_model_panel_text(models),pollinations_video_model_keyboard(models)); return
+
+        if data.startswith("pollvideomodel:"):
+            action=data.split(":",1)[1].strip()
+            if action=="__back__": send_model_management_panel(chat_id); return
+            models=fetch_pollinations_video_models()
+            if action=="__refresh__": send_message(chat_id,pollinations_video_model_panel_text(models),pollinations_video_model_keyboard(models)); return
+            if action not in models:
+                if callback_id: answer_callback_query(callback_id,"❌ این مدل دیگر در فهرست Pollinations نیست.",True)
+                return
+            if set_ai_setting("pollinations_video_model",action):
+                send_message(chat_id,"✅ <b>مدل ویدئو Pollinations انتخاب شد.</b>\n\n" f"🎬 مدل: <code>{html_text(action)}</code>",pollinations_video_model_keyboard(models))
             return
 
         if data == "modelpoll:list":
@@ -10627,6 +10920,9 @@ def process_private_message(message):
         except Exception:
 
             bot_username = None
+
+        if handle_video_command(message, chat, bot_username):
+            return
 
         if handle_image_command(
             message,
