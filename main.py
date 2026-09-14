@@ -1692,9 +1692,12 @@ def process_news_to_voice(chat_id, message_id, news_text):
 def handle_voice_command(message, chat, bot_username):
     """
     اگر پیام دستور خبر-به-صوت باشد (/voice، /خبر یا /news)، آن
-    را مدیریت می‌کند: یا بلافاصله متن همراه دستور را به صوت
-    تبدیل می‌کند، یا (اگر متنی همراه دستور نبود) منتظر پیام بعدی
-    (متن یا فوروارد) می‌ماند. خروجی True یعنی پیام پردازش شد.
+    را مدیریت می‌کند. متن هدف به این ترتیب پیدا می‌شود:
+    ۱) متن بعد از خودِ دستور (/voice متن خبر)
+    ۲) پیامی که این دستور روی آن ریپلای شده (کاربرد اصلی در
+       گروه/کانال: زیر یک پست ریپلای کن و بنویس /voice)
+    ۳) (فقط در چت خصوصی) منتظر پیام بعدی کاربر می‌ماند.
+    خروجی True یعنی پیام پردازش شد.
     """
 
     text = (message.get("text") or "").strip()
@@ -1706,31 +1709,39 @@ def handle_voice_command(message, chat, bot_username):
 
     chat_id = chat.get("id")
     message_id = message.get("message_id")
+    chat_type = chat.get("type")
 
     from_user = message.get("from") or {}
     requester_id = from_user.get("id")
 
-    if not is_ai_allowed(requester_id):
-
-        send_message(
-            chat_id,
-            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
-            reply_to_message_id=message_id
-        )
-
+    if not check_command_access(chat, requester_id, message_id):
         return True
 
     if not news_text:
+        news_text = get_text_from_message_or_reply(message, "") or ""
 
-        PENDING_ACTIONS[str(chat_id)] = "await_news_voice"
+    if not news_text:
 
-        send_message(
-            chat_id,
-            "🎙 <b>خبر به صوت</b>\n\n"
-            "متن خبر را بفرست یا پست خبر را Forward کن تا "
-            "تبدیل به صوت شود.\n\n"
-            "برای انصراف /cancel را بفرستید."
-        )
+        if chat_type == "private":
+
+            PENDING_ACTIONS[str(chat_id)] = "await_news_voice"
+
+            send_message(
+                chat_id,
+                "🎙 <b>خبر به صوت</b>\n\n"
+                "متن خبر را بفرست یا پست خبر را Forward کن تا "
+                "تبدیل به صوت شود.\n\n"
+                "برای انصراف /cancel را بفرستید."
+            )
+
+        else:
+
+            send_message(
+                chat_id,
+                "روی پیام موردنظر <b>ریپلای</b> کن و بنویس "
+                "<code>/voice</code>، یا متن را بعد از دستور بنویس.",
+                reply_to_message_id=message_id
+            )
 
         return True
 
@@ -2058,6 +2069,44 @@ def is_image_prompt_safe(prompt):
         return True
 
 
+def check_command_access(chat, requester_id, message_id):
+    """
+    بررسی دسترسی برای دستورات AI-محور (عکس/خلاصه/بازنویسی/صوت):
+
+    - در چت خصوصی: اگر دسترسی نداشت، پیام رد دسترسی نشان داده
+      می‌شود (چون فقط خودِ کاربر آن را می‌بیند).
+    - در گروه/سوپرگروه: بررسی is_ai_allowed انجام می‌شود، ولی در
+      صورت رد دسترسی، هیچ پیامی فرستاده نمی‌شود (کاملاً بی‌صدا)؛
+      این‌طوری اعضای عادی اصلاً متوجه وجود این دستورات نمی‌شوند.
+    - در کانال: بله خودش فقط اجازه می‌دهد ادمین‌های همان کانال
+      پست بگذارند (و پست‌های کانال اصلاً فیلد «from» ندارند)، پس
+      بررسی هویت لازم نیست و همیشه مجاز فرض می‌شود.
+
+    خروجی: True یعنی ادامه بده، False یعنی متوقف شو (خودِ این
+    تابع پیام رد دسترسی را در صورت نیاز فرستاده است).
+    """
+
+    chat_type = chat.get("type")
+    chat_id = chat.get("id")
+
+    if chat_type == "channel":
+        return True
+
+    if is_ai_allowed(requester_id):
+        return True
+
+    if chat_type == "private":
+
+        send_message(
+            chat_id,
+            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
+            reply_to_message_id=message_id
+        )
+
+    # گروه/سوپرگروه: عمداً هیچ پیامی فرستاده نمی‌شود.
+    return False
+
+
 def handle_image_command(message, chat, bot_username):
     """
     اگر پیام دستور ساخت عکس باشد (/image یا /عکس)، عکس را با
@@ -2078,14 +2127,7 @@ def handle_image_command(message, chat, bot_username):
     from_user = message.get("from") or {}
     requester_id = from_user.get("id")
 
-    if not is_ai_allowed(requester_id):
-
-        send_message(
-            chat_id,
-            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
-            reply_to_message_id=message_id
-        )
-
+    if not check_command_access(chat, requester_id, message_id):
         return True
 
     if not prompt:
@@ -2470,12 +2512,7 @@ def handle_summary_command(message, chat, bot_username):
     from_user = message.get("from") or {}
     requester_id = from_user.get("id")
 
-    if not is_ai_allowed(requester_id):
-        send_message(
-            chat_id,
-            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
-            reply_to_message_id=message_id
-        )
+    if not check_command_access(chat, requester_id, message_id):
         return True
 
     # اگر rest فقط عدد باشد (مثل /خلاصه 20) آن را متن ندان
@@ -2602,12 +2639,7 @@ def handle_rewrite_command(message, chat, bot_username):
     from_user = message.get("from") or {}
     requester_id = from_user.get("id")
 
-    if not is_ai_allowed(requester_id):
-        send_message(
-            chat_id,
-            "⛔ شما به بخش هوش مصنوعی این ربات دسترسی ندارید.",
-            reply_to_message_id=message_id
-        )
+    if not check_command_access(chat, requester_id, message_id):
         return True
 
     source_text = get_text_from_message_or_reply(message, rest)
@@ -5443,14 +5475,21 @@ def process_channel_message(message):
         )
 
         # ---------------------------------------------------
-        # 🤖 اگر این یک فوروارد نبود، شاید یک سوال معمولی از
-        # طرف یکی از اعضای گروه باشد. در این صورت فقط وقتی که
-        # ربات منشن/ریپلای شده باشد با Gemini پاسخ می‌دهیم. این
-        # کار فقط برای گروه/سوپرگروه انجام می‌شود (نه کانال،
-        # چون در کانال فقط ادمین‌ها می‌توانند پیام بگذارند).
+        # 🤖 اگر این یک فوروارد نبود، شاید یک دستور (عکس/خلاصه/
+        # بازنویسی/صوت) یا یک سوال معمولی از طرف یکی از اعضای
+        # گروه باشد.
+        #
+        # 🔧 کانال هم اینجا بررسی می‌شود (نه فقط گروه/سوپرگروه):
+        # چون در کانال فقط ادمین‌های همان کانال می‌توانند پست
+        # بگذارند، هر post که به دستِ ربات برسد خودبه‌خود از طرف
+        # یک ادمین است - نیازی به بررسی جداگانه‌ی هویت نیست. برای
+        # همین دستورات (مثلاً ریپلای روی یک پست + /voice) اینجا
+        # هم فعال می‌شوند، ولی پاسخ‌گویی آزاد با منشن (که به شناسه‌ی
+        # فرستنده نیاز دارد و در کانال اصلاً وجود ندارد) فقط برای
+        # گروه/سوپرگروه باقی می‌ماند.
         # ---------------------------------------------------
 
-        if chat_type in ("group", "supergroup"):
+        if chat_type in ("group", "supergroup", "channel"):
 
             try:
 
@@ -5458,8 +5497,7 @@ def process_channel_message(message):
                 bot_id = bot.get("id") if bot else None
                 bot_username = bot.get("username") if bot else None
 
-                # 🖼 دستور ساخت عکس (/image یا /عکس) در گروه به
-                # مانند سایر دستورات، بدون نیاز به منشن کار می‌کند.
+                # 🖼 دستور ساخت عکس (/image یا /عکس)
                 if handle_image_command(
                     message,
                     chat,
@@ -5481,14 +5519,25 @@ def process_channel_message(message):
                 ):
                     return
 
-                handle_ai_question(
+                # 🎙 خبر به صوت (/voice، /خبر یا /news) - معمولاً با
+                # ریپلای روی یک پست استفاده می‌شود.
+                if handle_voice_command(
                     message,
                     chat,
-                    chat_type,
-                    bot_id,
-                    bot_username,
-                    require_mention=True
-                )
+                    bot_username
+                ):
+                    return
+
+                if chat_type in ("group", "supergroup"):
+
+                    handle_ai_question(
+                        message,
+                        chat,
+                        chat_type,
+                        bot_id,
+                        bot_username,
+                        require_mention=True
+                    )
 
             except Exception as e:
 
