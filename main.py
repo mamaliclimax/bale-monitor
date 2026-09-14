@@ -1787,6 +1787,44 @@ def get_image_prompt_from_text(text, bot_username):
     return rest or None
 
 
+PERSIAN_CHAR_RE = re.compile(r"[\u0600-\u06FF]")
+
+
+def translate_prompt_to_english(prompt):
+    """
+    اگر prompt فارسی/عربی باشد، آن را به انگلیسی ترجمه می‌کند.
+    مدل‌های تصویرسازی رایگان (Flux روی Cloudflare/Pollinations)
+    عمدتاً روی کپشن‌های انگلیسی آموزش دیده‌اند و فارسی را درست
+    نمی‌فهمند؛ برای همین قبل از ساخت عکس، پرامپت فارسی به یک
+    توصیف انگلیسی طبیعی تبدیل می‌شود. اگر متن از قبل انگلیسی بود
+    یا ترجمه (هم با Gemini هم با Groq) شکست خورد، همان متن اصلی
+    بدون تغییر برگردانده می‌شود (بدتر از وضعیت فعلی نمی‌شود).
+    """
+
+    if not prompt or not PERSIAN_CHAR_RE.search(prompt):
+        return prompt
+
+    instruction = (
+        "Translate the following image-generation prompt from "
+        "Persian into a natural, vivid English image-generation "
+        "prompt. Output ONLY the translated prompt itself - no "
+        "quotes, no explanation, no extra text:\n\n" +
+        prompt.strip()
+    )
+
+    translated = ask_gemini(instruction, use_search=False)
+
+    if not translated and GROQ_API_KEY:
+        translated = ask_groq(instruction)
+
+    if not translated:
+        return prompt
+
+    translated = translated.strip().strip('"').strip("'").strip()
+
+    return translated or prompt
+
+
 def generate_cloudflare_image(prompt):
     """
     ساخت عکس با Cloudflare Workers AI (مدل Flux-1-Schnell).
@@ -1946,7 +1984,11 @@ def generate_image(prompt):
     """
     اول Cloudflare Workers AI (Flux) را امتحان می‌کند؛
     اگر کلید نبود یا خطا داد، به Pollinations برمی‌گردد.
+    قبل از هر دو، اگر پرامپت فارسی باشد، به انگلیسی ترجمه
+    می‌شود (چون هر دو موتور روی کپشن انگلیسی آموزش دیده‌اند).
     """
+
+    prompt = translate_prompt_to_english(prompt)
 
     image_path = generate_cloudflare_image(prompt)
 
@@ -7267,7 +7309,115 @@ def send_start(chat_id, user_id):
 
 def send_help(chat_id, user_id):
 
-    if is_admin(user_id):
+    ai_section = (
+        "\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "🤖 <b>بخش هوش مصنوعی</b>\n"
+        "(فقط برای مدیران و کاربرانی که دسترسی گرفته‌اند - "
+        "هم در خصوصی، هم با ریپلای زیر پست در گروه/کانال)\n\n"
+        "🔹 <b>گفت‌وگوی آزاد</b>\n"
+        "در خصوصی مستقیم پیام بده؛ در گروه باید ربات را "
+        "@mention کنی.\n\n"
+        "🔹 <b>خبر به صوت</b>\n"
+        "<code>/voice</code> یا <code>/خبر</code> یا "
+        "<code>/news</code>\n"
+        "روی یک پست ریپلای کن و دستور را بفرست، یا متن را "
+        "بعد از دستور بنویس؛ ربات آن را با صدا برایت می‌فرستد.\n\n"
+        "🔹 <b>ساخت عکس</b>\n"
+        "<code>/image</code> یا <code>/عکس</code> "
+        "+ توضیح عکس موردنظر\n\n"
+        "🔹 <b>خلاصه‌سازی</b>\n"
+        "<code>/خلاصه</code> یا <code>/summary</code>\n"
+        "روی متن بلند ریپلای کن، یا متن را بعد از دستور بنویس.\n\n"
+        "🔹 <b>بازنویسی متن</b>\n"
+        "<code>/بازنویس</code> — بازنویسی عادی و روان\n"
+        "<code>/بازنویس روابط عمومی</code> — لحن رسمی/سازمانی\n"
+        "<code>/بازنویس روان‌شناسانه</code> — لحن همدلانه/حمایتی\n\n"
+        "🔹 <b>پاک کردن حافظه‌ی گفت‌وگو</b>\n"
+        "<code>/reset_ai</code> یا <code>/پاک_حافظه</code>\n"
+        "اگر ربات جواب‌های عجیب/تکراری می‌داد، این را بزن.\n\n"
+        "🔒 <i>نکته: در گروه/کانال، اگر کاربری دسترسی نداشته "
+        "باشد، ربات کاملاً سکوت می‌کند تا این قابلیت‌ها برای "
+        "اعضای عادی دیده نشود.</i>"
+    )
+
+    ai_access_section = (
+        "\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "👤 <b>مدیریت دسترسی هوش مصنوعی</b>\n\n"
+        "🔹 <b>دادن دسترسی</b>\n"
+        "<code>/allow_ai USER_ID</code>\n\n"
+        "🔹 <b>گرفتن دسترسی</b>\n"
+        "<code>/disallow_ai USER_ID</code>\n\n"
+        "🔹 <b>لیست کاربران مجاز</b>\n"
+        "<code>/ai_users</code>\n\n"
+        "برای گرفتن USER_ID یه نفر، بگو با ربات در خصوصی "
+        "پیام بده و روی دکمه‌ی «🆔 شناسه من» بزنه."
+    )
+
+    owner_section = (
+        "\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "👑 <b>مخصوص مالک ربات</b>\n\n"
+        "🔹 <b>لیست مدیران</b>\n"
+        "<code>/admins</code>\n\n"
+        "🔹 <b>افزودن مدیر</b>\n"
+        "<code>/addadmin USER_ID</code>\n\n"
+        "🔹 <b>حذف مدیر</b>\n"
+        "<code>/removeadmin USER_ID</code>\n\n"
+        "🔹 <b>حذف کامل همه‌ی گزارش‌ها</b>\n"
+        "<code>/clearreports</code>\n"
+        "⚠️ غیرقابل‌بازگشت است."
+    )
+
+    if is_owner(user_id):
+
+        text = (
+            "❓ <b>راهنمای ربات (مالک)</b>\n\n"
+            "🔹 <b>انتخاب پست مبدأ</b>\n"
+            "یک پست را از کانال مبدأ به صورت "
+            "Forward برای ربات ارسال کنید.\n\n"
+            "🔹 <b>گزارش همین پست</b>\n"
+            "بعد از ارسال پست مبدأ، دکمه "
+            "«📊 گزارش همین پست» زیر پیام ظاهر می‌شود.\n\n"
+            "🔹 <b>ثبت بازنشر</b>\n"
+            "بعد از انتخاب پست مبدأ، اگر همان پست "
+            "در یکی از مقصدهای فعال Forward شود، "
+            "ربات آن را ثبت و گزارش می‌کند.\n\n"
+            "🔹 <b>استقلال مدیران</b>\n"
+            "هر مدیر می‌تواند پست مبدأ مخصوص خودش "
+            "را انتخاب کند و گزارش او مستقل از سایر مدیران است.\n\n"
+            "🔹 <b>افزودن مقصد</b>\n"
+            "<code>/addchannel @username</code>\n\n"
+            "🔹 <b>حذف مقصد</b>\n"
+            "<code>/removechannel @username</code>\n\n"
+            "🔹 <b>گزارش کلی</b>\n"
+            "از «📊 گزارش بازنشر» استفاده کنید.\n\n"
+            "🔹 <b>همگام‌سازی</b>\n"
+            "برای بررسی مقصدهای ثبت‌شده از گزینه "
+            "«🔄 همگام‌سازی» استفاده کنید.\n\n"
+            "🔹 <b>بازنشر گسترده</b>\n"
+            "با «📣 بازنشر گسترده» و سپس Forward کردن "
+            "یک پست، همان پست به‌صورت خودکار به تمام "
+            "مقصدهای فعال ارسال می‌شود (نیاز به ادمین "
+            "بودن ربات در آن مقصد دارد).\n\n"
+            "🔹 <b>گزارش مبدأ و مقصد</b>\n"
+            "با «📍 گزارش مبدأ و مقصد»، یک کانال مبدأ و "
+            "یک مقصد مشخص انتخاب می‌کنید و تعداد کل "
+            "بازنشرهای انجام‌شده بین آن دو را می‌بینید.\n\n"
+            "🔹 <b>خروجی اکسل</b>\n"
+            "با «📥 خروجی اکسل»، گزارش مبدأ انتخابی‌تان "
+            "به‌صورت فایل Excel ارسال می‌شود. با "
+            "«📥 اکسل کل گزارش‌ها» می‌توانید خروجی کامل "
+            "تمام بازنشرهای ثبت‌شده را هم دریافت کنید.\n\n"
+            "🔹 <b>شناسه من</b>\n"
+            "<code>/myid</code>"
+            + ai_section
+            + ai_access_section
+            + owner_section
+        )
+
+    elif is_admin(user_id):
 
         text = (
             "❓ <b>راهنمای ربات</b>\n\n"
@@ -7311,6 +7461,8 @@ def send_help(chat_id, user_id):
             "تمام بازنشرهای ثبت‌شده را هم دریافت کند.\n\n"
             "🔹 <b>شناسه من</b>\n"
             "<code>/myid</code>"
+            + ai_section
+            + ai_access_section
         )
 
     else:
@@ -7318,7 +7470,10 @@ def send_help(chat_id, user_id):
         text = (
             "❓ <b>راهنما</b>\n\n"
             "🆔 برای مشاهده شناسه کاربری:\n"
-            "<code>/myid</code>"
+            "<code>/myid</code>\n\n"
+            "برای دسترسی به بخش هوش مصنوعی (گفت‌وگو، ساخت "
+            "عکس، خبر به صوت، خلاصه‌سازی و بازنویسی متن)، "
+            "باید یکی از مدیران ربات دسترسی‌ت را فعال کند."
         )
 
     send_message(
