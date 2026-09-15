@@ -1574,7 +1574,7 @@ def ask_gemini(prompt, history=None, use_search=None):
     return None
 
 
-def ask_orcarouter(prompt, history=None, system_prompt=None):
+def ask_orcarouter(prompt, history=None, system_prompt=None, model=None):
     """
     ارسال سوال متنی به OrcaRouter از طریق API سازگار با OpenAI.
     مدل پیش‌فرض tencent/hy3-free است و می‌توان با ORCAROUTER_MODEL
@@ -1606,7 +1606,7 @@ def ask_orcarouter(prompt, history=None, system_prompt=None):
     messages.append({"role": "user", "content": prompt})
 
     payload = {
-        "model": get_selected_orcarouter_model(),
+        "model": model or get_selected_orcarouter_model(),
         "messages": messages,
         "temperature": 0.7
     }
@@ -1970,15 +1970,32 @@ def handle_ai_question(
     # مالک می‌تواند ارائه‌دهنده اصلی را از داخل ربات انتخاب کند.
     # default همان ترتیب پیش‌فرض قبلی را حفظ می‌کند.
     primary_provider = get_primary_ai_provider()
+    selected_model = {
+        "gemini": GEMINI_MODEL,
+        "orcarouter": get_selected_orcarouter_model(),
+        "groq": GROQ_WORKING_MODEL.get("id") or GROQ_MODEL or "auto",
+        "pollinations": get_pollinations_text_model(),
+    }.get(primary_provider, "fallback-chain")
+
+    print(f"🤖 AI ROUTE SELECTED: provider={primary_provider} model={selected_model}")
+
+    # هویت سرویس و مدل انتخاب‌شده را به مدل اعلام می‌کنیم تا خودش
+    # پاسخ‌هایی مانند «من GPT-4 هستم» را حدس نزند.
+    route_system_prompt = (
+        get_groq_system_prompt()
+        + "\n\nمهم: در مورد هویت خودت حدس نزن. "
+        + f"سرویس انتخاب‌شده در این درخواست {primary_provider} و مدل انتخاب‌شده {selected_model} است. "
+        + "اگر کاربر درباره مدل پرسید، فقط همین اطلاعات را بیان کن."
+    )
 
     if primary_provider == "gemini":
         answer = ask_gemini(prompt, history=history)
     elif primary_provider == "orcarouter":
-        answer = ask_orcarouter(prompt, history=history)
+        answer = ask_orcarouter(prompt, history=history, system_prompt=route_system_prompt, model=selected_model)
     elif primary_provider == "groq":
         answer = ask_groq(prompt, history=history)
     elif primary_provider == "pollinations":
-        answer = ask_pollinations_text(prompt, history=history)
+        answer = ask_pollinations_text(prompt, history=history, system_prompt=route_system_prompt, model=selected_model)
     else:
         answer = ask_gemini(prompt, history=history)
 
