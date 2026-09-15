@@ -1876,6 +1876,39 @@ def send_ai_voice_reply(chat_id, answer, message_id):
                 pass
 
 
+def is_model_identity_question(prompt):
+    """تشخیص پرسش‌هایی که درباره هویت سرویس/مدل فعال ربات هستند."""
+    text = (prompt or "").strip().lower()
+    phrases = (
+        "چه مدلی هستی", "مدل شما چیه", "مدل شما چیست", "چه هوش مصنوعی هستی",
+        "از چه مدلی استفاده میکنی", "از چه مدلی استفاده می کنی",
+        "مدل فعلی", "اسم مدل", "سرویس شما چیست", "چه سرویسی هستی",
+        "what model are you", "which model are you", "what ai are you"
+    )
+    return any(phrase in text for phrase in phrases)
+
+
+def build_model_identity_answer():
+    provider = get_primary_ai_provider()
+    if provider == "default":
+        return (
+            "🤖 حالت فعال ربات «پیش‌فرض» است؛ یعنی پاسخ‌گویی به‌ترتیب "
+            "Gemini، OrcaRouter، Groq و Pollinations انجام می‌شود.\n"
+            f"🧠 مدل اصلی: {GEMINI_MODEL}"
+        )
+    if provider == "gemini":
+        model = GEMINI_MODEL
+    elif provider == "orcarouter":
+        model = get_selected_orcarouter_model()
+    elif provider == "pollinations":
+        model = get_pollinations_text_model()
+    elif provider == "groq":
+        model = GROQ_MODEL or "مدل انتخابی/در دسترس Groq"
+    else:
+        model = "نامشخص"
+    return f"🤖 در حال حاضر با سرویس «{primary_ai_label(provider)}» و مدل «{model}» پاسخ می‌دهم."
+
+
 def handle_ai_question(
     message,
     chat,
@@ -1886,7 +1919,7 @@ def handle_ai_question(
 ):
     """
     اگر پیام باید توسط هوش مصنوعی پاسخ داده شود (طبق قوانین
-    گروه/خصوصی)، با Gemini پاسخ می‌دهد (متن + صوت). خروجی True
+    گروه/خصوصی)، با ارائه‌دهنده و مدل انتخاب‌شده پاسخ می‌دهد (متن + صوت). خروجی True
     یعنی پیام پردازش شد.
     """
 
@@ -1919,6 +1952,16 @@ def handle_ai_question(
 
     if not prompt:
         return False
+
+    # پاسخ هویتی باید از تنظیمات واقعی ربات بیاید، نه از حدس مدل زبانی.
+    if is_model_identity_question(prompt):
+        answer = build_model_identity_answer()
+        send_message(
+            chat_id,
+            html_text(answer),
+            reply_to_message_id=message_id
+        )
+        return True
 
     history = sanitize_ai_history(
         AI_CHAT_HISTORY.get(chat_id, [])
