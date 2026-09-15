@@ -257,7 +257,7 @@ def get_selected_orcarouter_model():
 # مدل‌های مختلف (openai، mistral، claude، gemini، deepseek،
 # grok و...) پشتیبانی می‌کند؛ مدل پیش‌فرض با دستور /text_model
 # توسط مالک ربات قابل‌تغییر است (بدون نیاز به ری‌دیپلوی).
-POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/openai"
+POLLINATIONS_TEXT_URL = "https://gen.pollinations.ai/v1/chat/completions"
 POLLINATIONS_MODELS_URL = "https://gen.pollinations.ai/v1/models"
 # کلید sk_ اختیاری (از enter.pollinations.ai) - فقط برای نرخ
 # بالاتر/مدل‌های ویژه لازم است، بدونش هم کار می‌کند.
@@ -994,6 +994,11 @@ def ask_groq(prompt, history=None):
     if not prompt or not prompt.strip():
         return None
 
+    # API جدید Pollinations برای تولید متن نیازمند کلید معتبر است.
+    if not POLLINATIONS_API_KEY:
+        print("POLLINATIONS TEXT ERROR: API key is required for gen.pollinations.ai")
+        return None
+
     messages = [
         {"role": "system", "content": get_groq_system_prompt()}
     ]
@@ -1171,8 +1176,16 @@ def ask_pollinations_text(prompt, history=None, system_prompt=None, model=None):
     if POLLINATIONS_API_KEY:
         headers["Authorization"] = f"Bearer {POLLINATIONS_API_KEY}"
 
+    selected_model = (model or get_pollinations_text_model() or "openai").strip()
+    # مدل قدیمی ثبت‌شده در تنظیمات را به مدل معتبر فعلی تبدیل می‌کنیم.
+    legacy_model_aliases = {
+        "deepseek/deepseek-v4.1-flash": "deepseek",
+        "deepseek-v4.1-flash": "deepseek",
+    }
+    selected_model = legacy_model_aliases.get(selected_model, selected_model)
+
     payload = {
-        "model": model or get_pollinations_text_model(),
+        "model": selected_model,
         "messages": messages
     }
 
@@ -1190,7 +1203,8 @@ def ask_pollinations_text(prompt, history=None, system_prompt=None, model=None):
             print(
                 "POLLINATIONS TEXT ERROR:",
                 response.status_code,
-                response.text[:400]
+                "model=", selected_model,
+                response.text[:600]
             )
 
             return None
